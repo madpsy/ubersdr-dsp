@@ -55,6 +55,17 @@ static std::string findModelPath(const std::string& modelHint = {})
     return {};
 }
 
+// Drain and print any pending log messages from the DeepFilter Rust runtime.
+static void drainDfLogs(DFState* st)
+{
+    if (!st) return;
+    char* msg;
+    while ((msg = df_next_log_msg(st)) != nullptr) {
+        fprintf(stderr, "DeepFilterFilter [rust]: %s\n", msg);
+        df_free_log_msg(msg);
+    }
+}
+
 DeepFilterFilter::DeepFilterFilter(const std::string& modelHint)
     : m_up(std::make_unique<Resampler>(24000, 48000))
     , m_down(std::make_unique<Resampler>(48000, 24000))
@@ -64,12 +75,15 @@ DeepFilterFilter::DeepFilterFilter(const std::string& modelHint)
         return;
     }
     fprintf(stderr, "DeepFilterFilter: loading model from %s\n", modelPath.c_str());
-    m_state = df_create(modelPath.c_str(), m_attenLimit.load(), nullptr);
+    m_state = df_create(modelPath.c_str(), m_attenLimit.load(), "warn");
     if (m_state) {
         m_frameSize = static_cast<int>(df_get_frame_length(m_state));
+        drainDfLogs(m_state);
         fprintf(stderr, "DeepFilterFilter: initialized, frame size = %d\n", m_frameSize);
     } else {
-        fprintf(stderr, "DeepFilterFilter: df_create() failed!\n");
+        fprintf(stderr, "DeepFilterFilter: df_create() failed! "
+                "(path=%s, check libgcc_s.so.1 is present and model file is readable)\n",
+                modelPath.c_str());
     }
 }
 

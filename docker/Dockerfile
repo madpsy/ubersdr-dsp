@@ -25,13 +25,19 @@ WORKDIR /src
 # Copy the full source tree
 COPY . .
 
-# Build the gRPC server — all filters enabled
-RUN cmake -S . -B build -GNinja \
+# Build the gRPC server.
+# DFNR (DeepFilterNet3) uses a pre-built x86_64-only static library, so it
+# is only enabled on amd64.  On arm64 the library is absent and CMake would
+# disable it anyway, but being explicit avoids a confusing linker error.
+RUN arch="$(uname -m)" && \
+    dfnr_flag=OFF && \
+    [ "$arch" = "x86_64" ] && dfnr_flag=ON || true && \
+    cmake -S . -B build -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
         -DWITH_GRPC_SERVER=ON \
         -DWITH_FFTW3=ON \
         -DWITH_SPECBLEACH=ON \
-        -DWITH_DFNR=ON \
+        -DWITH_DFNR="$dfnr_flag" \
         -DWITH_BNR=ON \
         -DBNR_PROTO_DIR=/src/third_party/bnr \
     && cmake --build build -j"$(nproc)"
@@ -55,6 +61,13 @@ RUN mkdir -p /deps \
 FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# libgcc_s.so.1 is loaded lazily at runtime by the Rust standard library
+# (used by libdeepfilter.a for panic unwinding).  It is not listed as a
+# direct dependency by ldd, so it must be installed explicitly.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the resolved shared libraries from the builder
 COPY --from=builder /deps/ /usr/local/lib/
