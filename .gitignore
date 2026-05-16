@@ -1,0 +1,26 @@
+# Build output
+build/
+
+# Compiled object files
+*.o
+*.d
+
+# Compiled binaries
+ubersdr-dsp
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo

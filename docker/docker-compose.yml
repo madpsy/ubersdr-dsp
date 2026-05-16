@@ -1,0 +1,54 @@
+services:
+
+  # ── ubersdr-dsp gRPC server ─────────────────────────────────────────────────
+  ubersdr-dsp:
+    image: madpsy/ubersdr-dsp:latest
+    container_name: ubersdr-dsp
+    ports:
+      - "50051:50051"      # gRPC endpoint
+    command: ["--grpc-port", "50051"]
+    restart: unless-stopped
+    networks:
+      - dsp-net
+    healthcheck:
+      # grpc_health_probe checks the gRPC health service registered by the server
+      test: ["CMD-SHELL", "grpc_health_probe -addr=localhost:50051 2>/dev/null || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ── NVIDIA Maxine BNR NIM ────────────────────────────────────────────────────
+  # Prerequisites:
+  #   1. docker login nvcr.io  (username: $oauthtoken, password: NGC API key)
+  #   2. docker pull nvcr.io/nim/nvidia/maxine-bnr:1.0.0
+  #   3. NVIDIA Container Toolkit installed on the host
+  #
+  # Usage:
+  #   docker compose --profile gpu up
+  #
+  # ubersdr-dsp will reach BNR at "maxine-bnr:8001" on the shared dsp-net network.
+  # Send a SessionConfig with:
+  #   filter_id: "bnr"
+  #   params { key: "bnr-address"  value: "maxine-bnr:8001" }
+  #   params { key: "intensity"    value: "0.8" }
+  maxine-bnr:
+    image: nvcr.io/nim/nvidia/maxine-bnr:1.0.0
+    container_name: maxine-bnr
+    profiles: [gpu]
+    ports:
+      - "8001:8001"        # expose on host too (optional, for direct testing)
+    networks:
+      - dsp-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+networks:
+  dsp-net:
+    driver: bridge

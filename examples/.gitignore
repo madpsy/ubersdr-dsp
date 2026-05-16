@@ -1,0 +1,8 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Generated gRPC stubs (regenerate with: see README or mic_to_speaker.py docstring)
+ubersdr_dsp_pb2.py
+ubersdr_dsp_pb2_grpc.py

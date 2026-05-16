@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package nvidia.maxine.bnr.v1;
+
+service MaxineBNR {
+    rpc EnhanceAudio(stream EnhanceAudioRequest) returns (stream EnhanceAudioResponse) {}
+}
+
+message EnhanceAudioConfig {
+    optional float intensity_ratio = 1;
+}
+
+message EnhanceAudioRequest {
+    oneof stream_input {    
+        bytes audio_stream_data = 1;
+
+        EnhanceAudioConfig config = 2;
+    }
+}
+
+message EnhanceAudioResponse {
+    oneof stream_output {
+        bytes audio_stream_data = 1;
+
+        EnhanceAudioConfig config = 2;
+    }
+}

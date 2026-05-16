@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package ubersdr.dsp.v1;
+
+option cc_generic_services = false;
+
+// ── Main DSP service ──────────────────────────────────────────────────────────
+
+service DspService {
+  // Bidirectional streaming audio processing.
+  // First client message must be SessionConfig; subsequent messages are
+  // AudioChunk or ParamUpdate. Server responds with AudioChunk, ParamAck,
+  // or ErrorResponse payloads.
+  rpc ProcessAudio(stream AudioRequest) returns (stream AudioResponse);
+
+  // Unary: query available filters and their tunable parameters.
+  rpc GetFilters(GetFiltersRequest) returns (GetFiltersResponse);
+}
+
+// ── Client → Server ───────────────────────────────────────────────────────────
+
+message AudioRequest {
+  oneof payload {
+    // First message on the stream: selects filter and sets initial params.
+    // Sending a second SessionConfig mid-stream is rejected.
+    SessionConfig config       = 1;
+
+    // Raw PCM audio frames to process.
+    AudioChunk    audio        = 2;
+
+    // Real-time parameter update — accepted any time after SessionConfig.
+    // Only the params you want to change need to be included.
+    ParamUpdate   param_update = 3;
+  }
+}
+
+message SessionConfig {
+  // Filter name: "nr2" | "rn2" | "nr4" | "dfnr" | "bnr"
+  string filter = 1;
+
+  // Frames per audio chunk, counted at the client sample rate (default: 960 = 40 ms at 24 kHz).
+  int32 block = 2;
+
+  // Initial parameter values as string key/value pairs.
+  // Keys match the CLI flag names without leading "--" (e.g. "gain-method", "reduction").
+  map<string, string> params = 3;
+
+  // Sample rate of the audio sent by the client, in Hz.
+  // Supported values: 12000, 24000 (default: 24000).
+  // The server resamples to/from its internal 24 kHz processing rate transparently.
+  // The response AudioChunks are returned at the same sample rate as the request.
+  int32 sample_rate = 4;
+
+  // Number of channels in the client audio (1 = mono, 2 = stereo, default: 2).
+  // Mono input is expanded to stereo internally before processing and collapsed
+  // back to mono in the response. All filters process stereo internally.
+  int32 channels = 5;
+}
+
+message ParamUpdate {
+  // Parameters to update. Only included keys are changed; others are untouched.
+  map<string, string> params = 1;
+}
+
+message AudioChunk {
+  // Raw IEEE 754 float32 little-endian stereo 24 kHz PCM.
+  // Length must be block * 2 * 4 bytes (block stereo frames × 2 channels × 4 bytes/float).
+  bytes  pcm_data     = 1;
+
+  // Monotonic counter for ordering / loss detection.
+  uint64 sequence_num = 2;
+
+  // Optional: source capture timestamp in microseconds.
+  uint64 timestamp_us = 3;
+}
+
+// ── Server → Client ───────────────────────────────────────────────────────────
+
+message AudioResponse {
+  oneof payload {
+    // Processed PCM audio (same format as input).
+    AudioChunk    audio  = 1;
+
+    // Acknowledgement of a ParamUpdate.
+    ParamAck      ack    = 2;
+
+    // Error notification (stream remains open unless the server closes it).
+    ErrorResponse error  = 3;
+  }
+
+  // Session identifier assigned by the server on the first response.
+  string session_id = 4;
+}
+
+message ParamAck {
+  // Parameters that were successfully applied (key → value actually set).
+  map<string, string> applied  = 1;
+
+  // Parameters that were rejected (key → reason string).
+  map<string, string> rejected = 2;
+}
+
+message ErrorResponse {
+  // Error codes:
+  //   FILTER_CHANGE_NOT_ALLOWED — SessionConfig sent after stream is configured
+  //   NOT_CONFIGURED            — AudioChunk or ParamUpdate before SessionConfig
+  //   FILTER_INIT_FAILED        — filter constructor failed (e.g. model not found)
+  //   INVALID_PARAM             — malformed param in SessionConfig.params
+  //   UNKNOWN_FILTER            — unrecognised filter name
+  string code    = 1;
+  string message = 2;
+}
+
+// ── Filter introspection ──────────────────────────────────────────────────────
+
+message GetFiltersRequest {}
+
+message GetFiltersResponse {
+  repeated FilterInfo filters = 1;
+}
+
+message FilterInfo {
+  string name        = 1;
+  string description = 2;
+  repeated ParamInfo params = 3;
+}
+
+message ParamInfo {
+  string name        = 1;
+  string type        = 2;  // "float" | "int" | "bool"
+  string default_val = 3;
+  string min_val     = 4;
+  string max_val     = 5;
+  string description = 6;
+  // All parameters in this service are runtime-safe (atomic setters).
+  bool   runtime_safe = 7;
+}

@@ -1,0 +1,32 @@
+# Build artifacts — never copy into the Docker build context
+build/
+.cache/
+*.o
+*.so
+*.so.*
+
+# Static libraries — excluded globally except the pre-built DeepFilterNet3 lib
+# which is required at build time for DFNR support.
+*.a
+!third_party/deepfilter/lib/**/*.a
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitmodules
+
+# Docker files themselves (avoid recursive inclusion)
+docker/
+
+# CI / test artefacts
+*.log
+*.tmp
+coverage/
