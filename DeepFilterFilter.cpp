@@ -1,6 +1,7 @@
 #ifdef HAVE_DFNR
 
 #include "DeepFilterFilter.h"
+#include "DeepFilterPool.h"
 #include "Resampler.h"
 #include "deep_filter.h"
 
@@ -15,7 +16,7 @@ static constexpr const char* kModelFileName = "DeepFilterNet3_onnx.tar.gz";
 
 // modelHint: explicit path supplied by the user (--model flag), or empty.
 // Falls back to searching standard locations.
-static std::string findModelPath(const std::string& modelHint = {})
+std::string findModelPath(const std::string& modelHint)
 {
     namespace fs = std::filesystem;
 
@@ -70,6 +71,26 @@ DeepFilterFilter::DeepFilterFilter(const std::string& modelHint)
     : m_up(std::make_unique<Resampler>(24000, 48000))
     , m_down(std::make_unique<Resampler>(48000, 24000))
 {
+    // Try the pool first — avoids the expensive df_create() on every session.
+    DFStatePool& pool = DFStatePool::instance();
+    if (pool.targetSize() > 0) {
+        m_state = pool.acquire();
+        if (m_state) {
+            m_fromPool = true;
+            m_frameSize = static_cast<int>(df_get_frame_length(m_state));
+            // Apply construction-time atten limit (pool states are created with
+            // the server default; honour any per-session override immediately).
+            df_set_atten_lim(m_state, m_attenLimit.load());
+            drainDfLogs(m_state);
+            fprintf(stderr, "DeepFilterFilter: acquired from pool, frame size = %d\n",
+                    m_frameSize);
+            return;
+        }
+        // Pool empty — fall through to inline df_create().
+        fprintf(stderr, "DeepFilterFilter: pool empty, falling back to inline df_create()\n");
+    }
+
+    // Inline path: pool not initialised, or all slots currently in use.
     std::string modelPath = findModelPath(modelHint);
     if (modelPath.empty()) {
         return;
@@ -89,24 +110,51 @@ DeepFilterFilter::DeepFilterFilter(const std::string& modelHint)
 
 DeepFilterFilter::~DeepFilterFilter()
 {
-    if (m_state) {
+    if (!m_state)
+        return;
+
+    if (m_fromPool) {
+        // Return to pool: pool will df_free() the dirty state and asynchronously
+        // create a fresh replacement.
+        DFStatePool::instance().release(m_state);
+    } else {
         df_free(m_state);
     }
+    m_state = nullptr;
 }
 
 void DeepFilterFilter::reset()
 {
+    // Release current state (via pool if it came from there).
     if (m_state) {
-        df_free(m_state);
+        if (m_fromPool) {
+            DFStatePool::instance().release(m_state);
+            m_fromPool = false;
+        } else {
+            df_free(m_state);
+        }
         m_state = nullptr;
     }
-    std::string modelPath = findModelPath();
-    if (!modelPath.empty()) {
-        m_state = df_create(modelPath.c_str(), m_attenLimit.load(), nullptr);
+
+    // Try pool first, then inline.
+    DFStatePool& pool = DFStatePool::instance();
+    if (pool.targetSize() > 0) {
+        m_state = pool.acquire();
         if (m_state) {
+            m_fromPool = true;
             m_frameSize = static_cast<int>(df_get_frame_length(m_state));
+            df_set_atten_lim(m_state, m_attenLimit.load());
         }
     }
+    if (!m_state) {
+        std::string modelPath = findModelPath();
+        if (!modelPath.empty()) {
+            m_state = df_create(modelPath.c_str(), m_attenLimit.load(), nullptr);
+            if (m_state)
+                m_frameSize = static_cast<int>(df_get_frame_length(m_state));
+        }
+    }
+
     m_up = std::make_unique<Resampler>(24000, 48000);
     m_down = std::make_unique<Resampler>(48000, 24000);
     m_inAccum.clear();

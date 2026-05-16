@@ -5,13 +5,18 @@
  *    DspService.GetFilters    — unary filter/param introspection
  *
  *  Usage:
- *    ubersdr-dsp [--grpc-port <port>]
+ *    ubersdr-dsp [--grpc-port <port>] [--dfnr-pool-size <n>] [--dfnr-model <path>]
  *
  *  The filter and all its parameters are configured per-stream via the
  *  SessionConfig message; no command-line filter selection is needed.
  */
 
 #include "DspServiceImpl.h"
+
+#ifdef HAVE_DFNR
+#  include "DeepFilterPool.h"
+#  include "DeepFilterFilter.h"  // AetherSDR::findModelPath
+#endif
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/health_check_service_interface.h>
@@ -62,9 +67,21 @@ int main(int argc, char** argv)
 {
     if (hasFlag(argc, argv, "--help") || hasFlag(argc, argv, "-h")) {
         fprintf(stderr,
-            "Usage: %s [--grpc-port <port>]\n"
+            "Usage: %s [--grpc-port <port>]"
+#ifdef HAVE_DFNR
+            " [--dfnr-pool-size <n>] [--dfnr-model <path>]"
+#endif
             "\n"
-            "  --grpc-port <port>   gRPC listen port (default: 50051)\n"
+            "\n"
+            "  --grpc-port <port>      gRPC listen port (default: 50051)\n"
+#ifdef HAVE_DFNR
+            "  --dfnr-pool-size <n>    Pre-warmed DeepFilterNet3 state pool size\n"
+            "                          (default: 10; 0 = disable pool, create per-session)\n"
+            "                          Each slot uses ~18 MB RAM.\n"
+            "                          Overrides DFNR_POOL_SIZE env var.\n"
+            "  --dfnr-model <path>     Path to DeepFilterNet3_onnx.tar.gz\n"
+            "                          (auto-detected if not specified)\n"
+#endif
             "\n"
             "Filter selection and parameters are configured per-stream via\n"
             "the SessionConfig gRPC message. See proto/ubersdr_dsp.proto.\n",
@@ -80,6 +97,34 @@ int main(int argc, char** argv)
     }
 
     const std::string listenAddr = "0.0.0.0:" + std::string(portStr);
+
+#ifdef HAVE_DFNR
+    // ── Initialise the DeepFilter state pool ──────────────────────────────────
+    // Pool size: CLI flag > DFNR_POOL_SIZE env var > default (10).
+    {
+        int poolSize = 10;
+        const char* envSize = getenv("DFNR_POOL_SIZE");
+        if (envSize && atoi(envSize) >= 0)
+            poolSize = atoi(envSize);
+        const char* argSize = getArg(argc, argv, "--dfnr-pool-size", nullptr);
+        if (argSize && atoi(argSize) >= 0)
+            poolSize = atoi(argSize);
+
+        // Resolve the model path once at startup using the same search logic
+        // as DeepFilterFilter, so all pool slots use a consistent, validated path.
+        const char* modelArg = getArg(argc, argv, "--dfnr-model", nullptr);
+        std::string modelPath = AetherSDR::findModelPath(modelArg ? modelArg : "");
+
+        if (poolSize > 0 && modelPath.empty()) {
+            fprintf(stderr, "DFStatePool: model not found — pool disabled "
+                    "(pass --dfnr-model <path> to enable)\n");
+        } else if (poolSize > 0) {
+            AetherSDR::DFStatePool::instance().init(modelPath, 100.0f, poolSize);
+        } else {
+            fprintf(stderr, "DFStatePool: pool disabled (--dfnr-pool-size 0)\n");
+        }
+    }
+#endif
 
     // ── Build and start the gRPC server ───────────────────────────────────────
     ubersdr::DspServiceImpl service;
@@ -120,6 +165,10 @@ int main(int argc, char** argv)
 
     server->Wait();
     watcher.join();
+
+#ifdef HAVE_DFNR
+    AetherSDR::DFStatePool::instance().shutdown();
+#endif
 
     fprintf(stderr, "ubersdr-dsp server stopped\n");
     return 0;

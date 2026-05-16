@@ -11,6 +11,11 @@ struct DFState;
 
 namespace AetherSDR {
 
+// Locate the DeepFilterNet3_onnx.tar.gz model file.
+// Searches (in order): modelHint (if non-empty), CWD, executable directory,
+// standard system paths.  Returns empty string if not found.
+std::string findModelPath(const std::string& modelHint = {});
+
 class Resampler;
 
 // Client-side neural noise reduction using DeepFilterNet3.
@@ -50,6 +55,7 @@ public:
 
 private:
     DFState* m_state{nullptr};
+    bool     m_fromPool{false};             // true → return via DFStatePool on destruction
     int m_frameSize{0};                     // samples per frame (from df_get_frame_length)
     std::unique_ptr<Resampler> m_up;        // 24kHz mono → 48kHz mono
     std::unique_ptr<Resampler> m_down;      // 48kHz mono → 24kHz mono
