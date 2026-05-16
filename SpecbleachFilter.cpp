@@ -32,6 +32,8 @@ SpecbleachFilter::~SpecbleachFilter()
 void SpecbleachFilter::reset()
 {
     m_frameCount = 0;
+    m_inAccum.clear();
+    m_outAccum.clear();
     if (m_handle)
         specbleach_reset_noise_profile(m_handle);
 }
@@ -59,10 +61,10 @@ void SpecbleachFilter::applyParams()
 
 std::vector<float> SpecbleachFilter::process(const float* stereoIn, int numStereoFrames)
 {
-    const int totalFloats = numStereoFrames * 2;
+    const int needed = numStereoFrames * 2; // stereo output samples to return
 
     if (!m_handle)
-        return std::vector<float>(stereoIn, stereoIn + totalFloats);
+        return std::vector<float>(stereoIn, stereoIn + needed);
 
     // Apply parameter changes if dirty
     if (m_paramsDirty.load())
@@ -71,35 +73,90 @@ std::vector<float> SpecbleachFilter::process(const float* stereoIn, int numStere
     if (numStereoFrames <= 0)
         return {};
 
-    // Resize buffers if needed
-    if (static_cast<int>(m_monoIn.size()) < numStereoFrames) {
-        m_monoIn.resize(numStereoFrames);
-        m_monoOut.resize(numStereoFrames);
-    }
-
-    // Stereo float32 → mono float (average L+R)
+    // ── Stereo → mono, append to input accumulator ────────────────────────────
+    // libspecbleach was initialised with a fixed 40 ms frame size (kFrameSamples).
+    // We accumulate incoming mono samples and feed complete frames to the library,
+    // keeping any leftover samples for the next call.
+    const int prevAccum = static_cast<int>(m_inAccum.size());
+    m_inAccum.resize(prevAccum + numStereoFrames);
     for (int i = 0; i < numStereoFrames; ++i)
-        m_monoIn[i] = (stereoIn[i * 2] + stereoIn[i * 2 + 1]) * 0.5f;
+        m_inAccum[prevAccum + i] = (stereoIn[i * 2] + stereoIn[i * 2 + 1]) * 0.5f;
 
-    // Process — feed audio to build noise profile even during learning
-    specbleach_process(m_handle, numStereoFrames, m_monoIn.data(), m_monoOut.data());
+    // ── Process complete kFrameSamples-sized frames ───────────────────────────
+    const int totalAccum   = static_cast<int>(m_inAccum.size());
+    const int completeFrames = totalAccum / kFrameSamples;
 
-    // During the learning period, pass original audio through so the user
-    // hears unprocessed audio instead of silence while the noise profile
-    // builds. The library still receives the audio above for profiling.
-    if (m_frameCount < kLearningFrames) {
-        ++m_frameCount;
-        return std::vector<float>(stereoIn, stereoIn + totalFloats);
+    if (completeFrames > 0) {
+        const int consumedSamples = completeFrames * kFrameSamples;
+
+        // Resize scratch buffers once
+        if (static_cast<int>(m_monoIn.size()) < consumedSamples) {
+            m_monoIn.resize(consumedSamples);
+            m_monoOut.resize(consumedSamples);
+        }
+
+        // Copy the consumed portion into a contiguous scratch buffer
+        std::copy(m_inAccum.begin(), m_inAccum.begin() + consumedSamples, m_monoIn.begin());
+
+        // Feed audio to build noise profile even during learning period
+        specbleach_process(m_handle, consumedSamples, m_monoIn.data(), m_monoOut.data());
+
+        // Keep leftover input samples
+        const int leftover = totalAccum - consumedSamples;
+        if (leftover > 0)
+            m_inAccum = std::vector<float>(m_inAccum.begin() + consumedSamples, m_inAccum.end());
+        else
+            m_inAccum.clear();
+
+        // During the learning period, pass original audio through so the user
+        // hears unprocessed audio instead of silence while the noise profile
+        // builds. The library still receives the audio above for profiling.
+        // m_frameCount counts complete kFrameSamples-sized frames processed.
+        const int prevFrameCount = m_frameCount;
+        m_frameCount += completeFrames;
+
+        // Expand processed mono → stereo and append to output accumulator.
+        // For frames still in the learning period, use the original stereo input
+        // instead of the processed output.
+        const int outBase = static_cast<int>(m_outAccum.size());
+        m_outAccum.resize(outBase + consumedSamples * 2);
+        for (int f = 0; f < completeFrames; ++f) {
+            const bool learning = (prevFrameCount + f) < kLearningFrames;
+            for (int s = 0; s < kFrameSamples; ++s) {
+                const int monoIdx   = f * kFrameSamples + s;
+                const int stereoIdx = outBase + monoIdx * 2;
+                if (learning) {
+                    // Passthrough: reconstruct stereo from original input.
+                    // The original stereo input for this frame starts at
+                    // frame f * kFrameSamples in the stereoIn array — but
+                    // stereoIn may be shorter than consumedSamples if the
+                    // client sent a smaller chunk.  Guard with a bounds check.
+                    const int srcIdx = monoIdx; // mono index == stereo frame index
+                    if (srcIdx < numStereoFrames) {
+                        m_outAccum[stereoIdx]     = stereoIn[srcIdx * 2];
+                        m_outAccum[stereoIdx + 1] = stereoIn[srcIdx * 2 + 1];
+                    } else {
+                        // Accumulated samples from a previous call — use mono value
+                        m_outAccum[stereoIdx]     = m_monoIn[monoIdx];
+                        m_outAccum[stereoIdx + 1] = m_monoIn[monoIdx];
+                    }
+                } else {
+                    m_outAccum[stereoIdx]     = m_monoOut[monoIdx];
+                    m_outAccum[stereoIdx + 1] = m_monoOut[monoIdx];
+                }
+            }
+        }
     }
 
-    // Mono float → stereo float32 (duplicate to L+R)
-    std::vector<float> result(totalFloats);
-    for (int i = 0; i < numStereoFrames; ++i) {
-        result[i * 2]     = m_monoOut[i];
-        result[i * 2 + 1] = m_monoOut[i];
+    // ── Return exactly numStereoFrames worth of stereo output ─────────────────
+    if (static_cast<int>(m_outAccum.size()) >= needed) {
+        std::vector<float> result(m_outAccum.begin(), m_outAccum.begin() + needed);
+        m_outAccum.erase(m_outAccum.begin(), m_outAccum.begin() + needed);
+        return result;
     }
 
-    return result;
+    // Not enough output yet — return silence (only during startup / first chunk)
+    return std::vector<float>(needed, 0.0f);
 }
 
 // Parameter setters — mark dirty so next process() applies them

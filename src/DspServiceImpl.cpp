@@ -81,7 +81,6 @@ grpc::Status DspServiceImpl::ProcessAudio(
     const std::string sessionId = generateSessionId();
     std::unique_ptr<IFilter> filter;
     bool configured = false;
-    int  blockFrames = 960; // default: 40 ms at 24 kHz
 
     // Resamplers are only created when the client rate differs from 24 kHz.
     std::unique_ptr<AetherSDR::Resampler> upsample;   // client → 24 kHz
@@ -107,7 +106,12 @@ grpc::Status DspServiceImpl::ProcessAudio(
             }
 
             const auto& cfg = req.config();
-            blockFrames = (cfg.block() > 0) ? cfg.block() : 960;
+
+            // block is advisory only — used as a buffer-size hint for the
+            // r8brain resampler when the client rate differs from 24 kHz.
+            // The server accepts AudioChunk payloads of any size; all filters
+            // handle variable-length input via their internal accumulators.
+            const int resamplerHint = (cfg.block() > 0) ? cfg.block() : 960;
 
             // Validate and store client sample rate
             clientRate = (cfg.sample_rate() > 0) ? cfg.sample_rate() : 24000;
@@ -140,12 +144,12 @@ grpc::Status DspServiceImpl::ProcessAudio(
                 return grpc::Status(grpc::StatusCode::INTERNAL, errMsg);
             }
 
-            // Create resamplers only when the client rate differs from 24 kHz
+            // Create resamplers only when the client rate differs from 24 kHz.
+            // resamplerHint is a buffer-size hint for r8brain (not a hard constraint).
             if (clientRate != 24000) {
-                // blockFrames is at the client rate; the 24 kHz block is larger
-                const int maxBlock = blockFrames * (24000 / clientRate) + 64;
+                const int maxBlock = resamplerHint * (24000 / clientRate) + 64;
                 upsample   = std::make_unique<AetherSDR::Resampler>(
-                                 clientRate, 24000, blockFrames);
+                                 clientRate, 24000, resamplerHint);
                 downsample = std::make_unique<AetherSDR::Resampler>(
                                  24000, clientRate, maxBlock);
             }
@@ -153,8 +157,8 @@ grpc::Status DspServiceImpl::ProcessAudio(
             pcmEncoding = cfg.pcm_encoding();
 
             configured = true;
-            fprintf(stderr, "[%s] configured filter=%s block=%d sample_rate=%d channels=%d pcm_encoding=%s\n",
-                    sessionId.c_str(), cfg.filter().c_str(), blockFrames, clientRate, clientChannels,
+            fprintf(stderr, "[%s] configured filter=%s block=%d(hint) sample_rate=%d channels=%d pcm_encoding=%s\n",
+                    sessionId.c_str(), cfg.filter().c_str(), resamplerHint, clientRate, clientChannels,
                     (pcmEncoding == dsp::v1::PCM_INT16_BE) ? "int16_be" : "float32_le");
 
             // Send a ParamAck with empty maps to signal successful configuration

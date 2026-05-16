@@ -50,7 +50,12 @@ message SessionConfig {
   // Filter name: "nr2" | "rn2" | "nr4" | "dfnr" | "bnr"
   string filter = 1;
 
-  // Frames per audio chunk, counted at the client sample rate (default: 960 = 40 ms at 24 kHz).
+  // Advisory chunk size hint, in frames at the client sample rate.
+  // The server accepts AudioChunk payloads of ANY size — all filters handle
+  // variable-length input via internal accumulators.  When block > 0 it is
+  // used only as a buffer-size hint for the r8brain resampler (relevant when
+  // sample_rate != 24000); it does not constrain the pcm_data length.
+  // Set to 0 (or omit) to let the server use its default hint of 960 frames.
   int32 block = 2;
 
   // Initial parameter values as string key/value pairs.
@@ -81,8 +86,11 @@ message ParamUpdate {
 }
 
 message AudioChunk {
-  // Raw IEEE 754 float32 little-endian stereo 24 kHz PCM.
-  // Length must be block * 2 * 4 bytes (block stereo frames × 2 channels × 4 bytes/float).
+  // PCM audio data in the format declared by SessionConfig.pcm_encoding.
+  // Any length is accepted provided it is a whole number of frames:
+  //   PCM_FLOAT32_LE: len % (channels * 4) == 0
+  //   PCM_INT16_BE:   len % (channels * 2) == 0
+  // The server processes whatever arrives; no fixed block size is required.
   bytes  pcm_data     = 1;
 
   // Monotonic counter for ordering / loss detection.

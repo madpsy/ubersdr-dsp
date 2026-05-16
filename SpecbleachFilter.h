@@ -59,7 +59,16 @@ private:
     int m_frameCount{0};
     static constexpr int kLearningFrames = 25;  // ~1 sec at 40ms/frame
 
-    // Buffers
+    // Internal accumulation buffers — allow the server to send any chunk size.
+    // libspecbleach was initialised with a fixed 40 ms frame size (kFrameSamples).
+    // We accumulate incoming mono samples and feed complete frames to the library,
+    // keeping leftovers for the next call.  Processed output is accumulated in
+    // m_outAccum and returned in the same quantity as the input.
+    static constexpr int kFrameSamples = 960; // 40 ms at 24 kHz
+    std::vector<float> m_inAccum;   // mono input accumulator
+    std::vector<float> m_outAccum;  // stereo output accumulator
+
+    // Per-call mono scratch buffers (resized as needed)
     std::vector<float> m_monoIn;
     std::vector<float> m_monoOut;
 };

@@ -282,7 +282,7 @@ Client                                    Server
 ```protobuf
 message SessionConfig {
   string filter = 1;              // "nr2" | "rn2" | "nr4" | "dfnr" | "bnr"
-  int32  block  = 2;              // frames per chunk at client rate (default: 960 = 40 ms at 24 kHz)
+  int32  block  = 2;              // advisory chunk-size hint in frames (0 = use server default)
   map<string,string> params = 3;  // initial parameter values (optional)
   int32  sample_rate = 4;         // client audio sample rate in Hz (default: 24000)
   int32  channels    = 5;         // 1 = mono, 2 = stereo (default: 2)
@@ -293,9 +293,11 @@ message SessionConfig {
 - `filter` is required. If the name is unknown or the filter failed to
   initialise, the server sends an `ErrorResponse` and closes the stream with
   gRPC status `INTERNAL`.
-- `block` sets the expected number of frames per chunk at the **client sample
-  rate**. Chunks that are not a multiple of `block × channels × bytesPerSample`
-  bytes are rejected with `INVALID_AUDIO`.
+- `block` is **advisory only**. The server accepts `AudioChunk` payloads of
+  **any size** — all filters handle variable-length input via internal
+  accumulators. When `block > 0` it is used only as a buffer-size hint for the
+  r8brain resampler (relevant when `sample_rate != 24000`). Set to `0` or omit
+  entirely to use the server's default hint of 960 frames (40 ms at 24 kHz).
 - `sample_rate` declares the sample rate of the PCM the client will send.
   Supported values: `12000`, `24000` (default: `24000`). The server
   transparently resamples to/from its internal 24 kHz processing rate using
@@ -333,18 +335,22 @@ On success the server responds with an empty `ParamAck` (`applied` and
 
 ```protobuf
 message AudioChunk {
-  bytes  pcm_data     = 1;  // float32 LE PCM at client sample_rate and channels
+  bytes  pcm_data     = 1;  // PCM audio in the format declared by SessionConfig.pcm_encoding
   uint64 sequence_num = 2;  // monotonic counter (echoed back)
   uint64 timestamp_us = 3;  // optional capture timestamp
 }
 ```
 
-- `pcm_data` must be exactly `block × channels × bytesPerSample` bytes, where
-  `bytesPerSample` is `4` for `PCM_FLOAT32_LE` or `2` for `PCM_INT16_BE`, and
-  `block` and `channels` are as declared in `SessionConfig`.
-- The server processes the chunk and responds with an `AudioChunk` of the same
-  size and channel layout (at the client sample rate), with `sequence_num`
-  copied from the request.
+- `pcm_data` may be **any length** provided it is a whole number of frames:
+  - `PCM_FLOAT32_LE`: `len % (channels × 4) == 0`
+  - `PCM_INT16_BE`:   `len % (channels × 2) == 0`
+
+  No fixed block size is required. The server accumulates samples internally
+  and feeds each filter in its preferred frame size. Chunks that are not a
+  whole number of frames are rejected with `INVALID_AUDIO`.
+- The server responds with an `AudioChunk` containing the same number of frames
+  as the request, at the client sample rate and channel count, with
+  `sequence_num` copied from the request.
 - Sending audio before `SessionConfig` is rejected with `NOT_CONFIGURED`.
 
 #### Step 3 — Update parameters at runtime (optional)
@@ -388,7 +394,7 @@ message ErrorResponse {
 | `INVALID_CHANNELS` | `channels` is not `1` or `2` | No — server also closes with gRPC `INVALID_ARGUMENT` |
 | `FILTER_CHANGE_NOT_ALLOWED` | Second `SessionConfig` sent after stream is configured | Yes |
 | `NOT_CONFIGURED` | `AudioChunk` or `ParamUpdate` sent before `SessionConfig` | Yes |
-| `INVALID_AUDIO` | `pcm_data` length is not a multiple of `channels × bytesPerSample` bytes | Yes |
+| `INVALID_AUDIO` | `pcm_data` length is not a whole number of frames (`channels × bytesPerSample`) | Yes |
 
 ---
 
@@ -473,18 +479,18 @@ resp = stub.GetFilters(pb.GetFiltersRequest())
 for f in resp.filters:
     print(f.name, f.description)
 
-# 2. Open a processing stream (24 kHz stereo, 40 ms blocks)
+# 2. Open a processing stream (24 kHz stereo, any chunk size)
 def requests():
     yield pb.AudioRequest(config=pb.SessionConfig(
         filter="nr2",
-        block=960,
+        block=0,            # advisory only — 0 = use server default (960)
         sample_rate=24000,
         channels=2,
         params={"gain-method": "2", "gain-smooth": "0.9"},
     ))
     seq = itertools.count()
     with open("input.raw", "rb") as f:
-        while chunk := f.read(960 * 2 * 4):   # 960 frames × 2 ch × 4 bytes
+        while chunk := f.read(960 * 2 * 4):   # any multiple of channels×4 bytes works
             yield pb.AudioRequest(audio=pb.AudioChunk(
                 pcm_data=chunk,
                 sequence_num=next(seq),
@@ -501,19 +507,19 @@ with open("output.raw", "wb") as out:
             print("ERROR", response.error.code, response.error.message)
 ```
 
-**Mono example** (12 kHz mono, 20 ms blocks, DFNR filter):
+**Mono example** (12 kHz mono, DFNR filter, variable chunk size):
 
 ```python
 yield pb.AudioRequest(config=pb.SessionConfig(
     filter="dfnr",
-    block=240,          # 240 frames × 1 ch × 4 bytes = 960 bytes per chunk
+    block=240,          # advisory hint for r8brain resampler (240 frames at 12 kHz)
     sample_rate=12000,
     channels=1,
     params={"atten-limit": "80"},
 ))
-# Each AudioChunk.pcm_data = 240 × 1 × 4 = 960 bytes
+# AudioChunk.pcm_data can be any multiple of 1×2 bytes (int16) or 1×4 bytes (float32).
 # Server expands mono→stereo, upsamples 12→24 kHz, runs DFNR,
-# downsamples 24→12 kHz, collapses stereo→mono, returns 960 bytes.
+# downsamples 24→12 kHz, collapses stereo→mono, returns same frame count.
 ```
 
 Generate the Python stubs from the proto file:
