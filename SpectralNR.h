@@ -187,7 +187,13 @@ private:
 
     // Startup ramp
     int m_frameCount{0};                // frames processed since reset
-    static constexpr int RampFrames = 187; // ~1 second at 24kHz/128hop
+    int m_rampFrames{0};                // = 2*m_D, set in constructor (covers full OSMS convergence)
+
+    // Set to true the first time an OLA frame is processed.  The output read
+    // loop emits zeros until this is true, preventing the startup click that
+    // occurs when the first input chunk is smaller than fftSize (so no frame
+    // fires on call 1 and the pre-zeroed ring would be read as silence).
+    bool m_firstFrameFired{false};
 
     // ── Algorithm constants (fixed) ─────────────────────────────────────
     static constexpr double Alpha      = 0.98;    // decision-directed smoothing

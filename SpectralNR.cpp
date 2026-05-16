@@ -68,6 +68,13 @@ SpectralNR::SpectralNR(int fftSize, int sampleRate)
     m_V = std::max(1, m_D / m_U);
     m_D = m_U * m_V;
 
+    // Ramp covers 2× the OSMS convergence window so the dry→wet crossfade
+    // always spans the full noise-estimator warm-up period.  The old hardcoded
+    // value (187) assumed 24 kHz / 128-hop and was only ~1× m_D; doubling it
+    // ensures the output stays mostly dry while the OSMS settles, eliminating
+    // the musical-noise crackling that occurs during convergence.
+    m_rampFrames = 2 * m_D;
+
     // Allocate overlap-add accumulators
     m_inAccum.resize(fftSize * 4, 0.0);
     m_outAccum.resize(fftSize * 4, 0.0);
@@ -159,6 +166,7 @@ void SpectralNR::reset()
     m_inWritePos = 0;
     m_inReadPos = 0;
     m_samplesAccum = 0;
+    m_firstFrameFired = false;
 
     // Critical: output write position must lead read position by (fftSize - hopSize)
     // so that the overlap-add accumulates both frame contributions before samples
@@ -353,13 +361,23 @@ void SpectralNR::process(const float* input, float* output, int numSamples)
             m_outAccum[idx] += m_window[i] * m_ifftOut[i];
         }
         m_outWritePos = (m_outWritePos + m_hopSize) % outSize;
+        m_firstFrameFired = true;
     }
 
-    // Read output samples (float64 -> float32), clearing consumed positions
-    for (int i = 0; i < numSamples; ++i) {
-        output[i] = static_cast<float>(m_outAccum[m_outReadPos]);
-        m_outAccum[m_outReadPos] = 0.0;
-        m_outReadPos = (m_outReadPos + 1) % outSize;
+    // Read output samples (float64 -> float32), clearing consumed positions.
+    // Guard on m_firstFrameFired: before the first OLA frame has been processed
+    // (which happens when the first chunk is smaller than fftSize), emit zeros
+    // rather than reading the pre-zeroed ring — prevents the startup click that
+    // would otherwise occur on the very first packet from ubersdr/radiod.
+    // Once the first frame has fired the ring is valid and we read unconditionally.
+    if (m_firstFrameFired) {
+        for (int i = 0; i < numSamples; ++i) {
+            output[i] = static_cast<float>(m_outAccum[m_outReadPos]);
+            m_outAccum[m_outReadPos] = 0.0;
+            m_outReadPos = (m_outReadPos + 1) % outSize;
+        }
+    } else {
+        std::fill(output, output + numSamples, 0.0f);
     }
 }
 
@@ -402,12 +420,14 @@ void SpectralNR::processFrame()
         m_smoothMask[k] = gs * m_smoothMask[k] + (1.0 - gs) * m_mask[k];
     }
 
-    // Startup ramp: crossfade from dry (gain=1) to processed over ~1 second
-    // to avoid transients while the noise estimator converges.
+    // Startup ramp: crossfade from dry (gain=1) to processed over 2×m_D frames
+    // (twice the OSMS convergence window) so the output stays mostly dry while
+    // the noise estimator settles — eliminating musical-noise crackling during
+    // the warm-up period.  m_rampFrames is set in the constructor from m_D.
     ++m_frameCount;
-    double wet = (m_frameCount >= RampFrames)
+    double wet = (m_frameCount >= m_rampFrames)
         ? 1.0
-        : static_cast<double>(m_frameCount) / RampFrames;
+        : static_cast<double>(m_frameCount) / m_rampFrames;
 
     // Apply smoothed gain to frequency bins (with dry/wet blend during startup)
     for (int k = 0; k < m_msize; ++k) {
