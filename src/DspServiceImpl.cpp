@@ -8,6 +8,8 @@
 #include "filters/DfnrFilterWrapper.h"
 #include "filters/BnrFilterWrapper.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -86,6 +88,7 @@ grpc::Status DspServiceImpl::ProcessAudio(
     std::unique_ptr<AetherSDR::Resampler> downsample; // 24 kHz → client
     int clientRate     = 24000;
     int clientChannels = 2;    // 1 = mono, 2 = stereo
+    dsp::v1::PcmEncoding pcmEncoding = dsp::v1::PCM_FLOAT32_LE;
 
     fprintf(stderr, "[%s] stream opened\n", sessionId.c_str());
 
@@ -147,9 +150,12 @@ grpc::Status DspServiceImpl::ProcessAudio(
                                  24000, clientRate, maxBlock);
             }
 
+            pcmEncoding = cfg.pcm_encoding();
+
             configured = true;
-            fprintf(stderr, "[%s] configured filter=%s block=%d sample_rate=%d channels=%d\n",
-                    sessionId.c_str(), cfg.filter().c_str(), blockFrames, clientRate, clientChannels);
+            fprintf(stderr, "[%s] configured filter=%s block=%d sample_rate=%d channels=%d pcm_encoding=%s\n",
+                    sessionId.c_str(), cfg.filter().c_str(), blockFrames, clientRate, clientChannels,
+                    (pcmEncoding == dsp::v1::PCM_INT16_BE) ? "int16_be" : "float32_le");
 
             // Send a ParamAck with empty maps to signal successful configuration
             stream->Write(makeParamAck({}, {}, sessionId));
@@ -199,21 +205,46 @@ grpc::Status DspServiceImpl::ProcessAudio(
             const auto& chunk = req.audio();
             const std::string& raw = chunk.pcm_data();
 
-            // Validate: must be a whole number of float32 frames for the declared channel count
-            if (raw.size() % (sizeof(float) * static_cast<size_t>(clientChannels)) != 0) {
+            // Validate: must be a whole number of frames for the declared channel count
+            // and encoding (2 bytes/sample for int16, 4 bytes/sample for float32).
+            const size_t bytesPerSample = (pcmEncoding == dsp::v1::PCM_INT16_BE)
+                                          ? sizeof(int16_t) : sizeof(float);
+            if (raw.size() % (bytesPerSample * static_cast<size_t>(clientChannels)) != 0) {
                 stream->Write(makeError(
                     "INVALID_AUDIO",
                     "pcm_data length is not a multiple of " +
-                        std::to_string(sizeof(float) * clientChannels) +
-                        " bytes (float32 frame for " +
+                        std::to_string(bytesPerSample * clientChannels) +
+                        " bytes (" +
+                        ((pcmEncoding == dsp::v1::PCM_INT16_BE) ? "int16_be" : "float32_le") +
+                        " frame for " +
                         std::to_string(clientChannels) + " channel(s)).",
                     sessionId));
                 continue;
             }
 
             const int numFrames = static_cast<int>(
-                raw.size() / (sizeof(float) * static_cast<size_t>(clientChannels)));
-            const float* pcm = reinterpret_cast<const float*>(raw.data());
+                raw.size() / (bytesPerSample * static_cast<size_t>(clientChannels)));
+
+            // ── Decode inbound PCM ────────────────────────────────────────────
+            // For PCM_INT16_BE: convert each big-endian int16 sample to float32.
+            // For PCM_FLOAT32_LE: use the raw bytes directly (no copy needed).
+            std::vector<float> decodedPcm;
+            const float* pcm;
+            if (pcmEncoding == dsp::v1::PCM_INT16_BE) {
+                const int numSamples = numFrames * clientChannels;
+                decodedPcm.resize(numSamples);
+                const uint8_t* src = reinterpret_cast<const uint8_t*>(raw.data());
+                for (int i = 0; i < numSamples; ++i) {
+                    // Reconstruct big-endian int16 from two bytes
+                    const int16_t s = static_cast<int16_t>(
+                        (static_cast<uint16_t>(src[i * 2]) << 8) |
+                         static_cast<uint16_t>(src[i * 2 + 1]));
+                    decodedPcm[i] = static_cast<float>(s) / 32768.0f;
+                }
+                pcm = decodedPcm.data();
+            } else {
+                pcm = reinterpret_cast<const float*>(raw.data());
+            }
 
             // ── Mono → stereo expansion ───────────────────────────────────────
             // All filters and resamplers work on interleaved stereo internally.
@@ -253,7 +284,28 @@ grpc::Status DspServiceImpl::ProcessAudio(
                 processed = std::move(mono);
             }
 
-            stream->Write(makeAudioResponse(processed, chunk.sequence_num(), sessionId));
+            // ── Encode outbound PCM ───────────────────────────────────────────
+            // For PCM_INT16_BE: convert each float32 sample back to big-endian int16.
+            // For PCM_FLOAT32_LE: makeAudioResponse writes the float bytes directly.
+            if (pcmEncoding == dsp::v1::PCM_INT16_BE) {
+                const int numSamples = static_cast<int>(processed.size());
+                std::string outBytes(static_cast<size_t>(numSamples) * 2, '\0');
+                uint8_t* dst = reinterpret_cast<uint8_t*>(outBytes.data());
+                for (int i = 0; i < numSamples; ++i) {
+                    const float clamped = std::clamp(processed[i], -1.0f, 1.0f);
+                    const int16_t s = static_cast<int16_t>(clamped * 32767.0f);
+                    dst[i * 2]     = static_cast<uint8_t>((s >> 8) & 0xFF);
+                    dst[i * 2 + 1] = static_cast<uint8_t>(s & 0xFF);
+                }
+                dsp::v1::AudioResponse resp;
+                resp.set_session_id(sessionId);
+                auto* outChunk = resp.mutable_audio();
+                outChunk->set_pcm_data(outBytes);
+                outChunk->set_sequence_num(chunk.sequence_num());
+                stream->Write(resp);
+            } else {
+                stream->Write(makeAudioResponse(processed, chunk.sequence_num(), sessionId));
+            }
             continue;
         }
 

@@ -7,7 +7,7 @@ noise reduction algorithm, and returns processed PCM on the same stream.
 
 - **Sample rates:** `12000` or `24000` Hz (client declares; server resamples transparently)
 - **Channels:** `1` (mono) or `2` (stereo, default)
-- **Sample format:** IEEE 754 float32, little-endian, interleaved
+- **Sample format:** IEEE 754 float32 little-endian (default) **or** signed int16 big-endian (radiod/ubersdr)
 - Zero Qt dependency — only the C/C++ standard library, FFTW3, and gRPC/protobuf are required at runtime.
 
 ---
@@ -29,7 +29,11 @@ noise reduction algorithm, and returns processed PCM on the same stream.
 Every `ProcessAudio` stream goes through the following stages on each chunk:
 
 ```
-Client PCM (client_rate, client_channels, float32)
+Client PCM (client_rate, client_channels, pcm_encoding)
+        │
+        ▼
+[Decode inbound PCM]               (only when pcm_encoding=PCM_INT16_BE)
+  int16 BE → float32: f = int16(BE) / 32768.0
         │
         ▼
 [Mono → Stereo expansion]          (only when channels=1)
@@ -52,7 +56,11 @@ Client PCM (client_rate, client_channels, float32)
   Output mono[i] = (L[i] + R[i]) × 0.5
         │
         ▼
-Response PCM (client_rate, client_channels, float32)
+[Encode outbound PCM]              (only when pcm_encoding=PCM_INT16_BE)
+  float32 → int16 BE: s = clamp(f, -1, 1) × 32767 as big-endian int16
+        │
+        ▼
+Response PCM (client_rate, client_channels, pcm_encoding)
 ```
 
 **DFNR** has an additional internal resampling stage inside `DeepFilterFilter`:
@@ -278,6 +286,7 @@ message SessionConfig {
   map<string,string> params = 3;  // initial parameter values (optional)
   int32  sample_rate = 4;         // client audio sample rate in Hz (default: 24000)
   int32  channels    = 5;         // 1 = mono, 2 = stereo (default: 2)
+  PcmEncoding pcm_encoding = 6;  // wire format of pcm_data (default: PCM_FLOAT32_LE)
 }
 ```
 
@@ -285,8 +294,8 @@ message SessionConfig {
   initialise, the server sends an `ErrorResponse` and closes the stream with
   gRPC status `INTERNAL`.
 - `block` sets the expected number of frames per chunk at the **client sample
-  rate**. Chunks that are not a multiple of `block × channels × 4` bytes are
-  rejected with `INVALID_AUDIO`.
+  rate**. Chunks that are not a multiple of `block × channels × bytesPerSample`
+  bytes are rejected with `INVALID_AUDIO`.
 - `sample_rate` declares the sample rate of the PCM the client will send.
   Supported values: `12000`, `24000` (default: `24000`). The server
   transparently resamples to/from its internal 24 kHz processing rate using
@@ -298,6 +307,20 @@ message SessionConfig {
   to L and R) before the filter, and collapsed back to mono in the response
   (L+R averaged). All filters process stereo internally. An unsupported value
   is rejected with `INVALID_CHANNELS` and gRPC status `INVALID_ARGUMENT`.
+- `pcm_encoding` declares the wire format of `pcm_data` bytes in `AudioChunk`
+  messages (both inbound and outbound). Supported values:
+
+  | Value | Bytes/sample | Description |
+  |-------|:---:|-------------|
+  | `PCM_FLOAT32_LE` (0) | 4 | IEEE 754 float32, little-endian **(default)** |
+  | `PCM_INT16_BE` (1) | 2 | Signed 16-bit integer, big-endian (radiod/ubersdr format) |
+
+  When `PCM_INT16_BE` is set, the server converts inbound bytes to float32
+  (`int16(BE) / 32768.0`) before processing, and converts the processed float32
+  back to int16 BE (`clamp(f, −1, 1) × 32767`) before sending the response.
+  All internal processing (filters, resamplers) always uses float32 LE.
+  The default (`PCM_FLOAT32_LE`) preserves the existing behaviour exactly.
+
 - `params` keys use the same names as shown in the **Filter parameters
   reference** section below. Values are always strings.
 - Sending a second `SessionConfig` mid-stream is rejected with
@@ -316,9 +339,9 @@ message AudioChunk {
 }
 ```
 
-- `pcm_data` must be exactly `block × channels × 4` bytes
-  (`block` frames × channel count × 4 bytes per float32), where `block` and
-  `channels` are as declared in `SessionConfig`.
+- `pcm_data` must be exactly `block × channels × bytesPerSample` bytes, where
+  `bytesPerSample` is `4` for `PCM_FLOAT32_LE` or `2` for `PCM_INT16_BE`, and
+  `block` and `channels` are as declared in `SessionConfig`.
 - The server processes the chunk and responds with an `AudioChunk` of the same
   size and channel layout (at the client sample rate), with `sequence_num`
   copied from the request.
@@ -365,7 +388,7 @@ message ErrorResponse {
 | `INVALID_CHANNELS` | `channels` is not `1` or `2` | No — server also closes with gRPC `INVALID_ARGUMENT` |
 | `FILTER_CHANGE_NOT_ALLOWED` | Second `SessionConfig` sent after stream is configured | Yes |
 | `NOT_CONFIGURED` | `AudioChunk` or `ParamUpdate` sent before `SessionConfig` | Yes |
-| `INVALID_AUDIO` | `pcm_data` length is not a multiple of `channels × 4` bytes | Yes |
+| `INVALID_AUDIO` | `pcm_data` length is not a multiple of `channels × bytesPerSample` bytes | Yes |
 
 ---
 

@@ -17,6 +17,18 @@ service DspService {
   rpc GetFilters(GetFiltersRequest) returns (GetFiltersResponse);
 }
 
+// ── PCM wire encoding ─────────────────────────────────────────────────────────
+
+enum PcmEncoding {
+  // IEEE 754 float32, little-endian (default — existing behaviour).
+  PCM_FLOAT32_LE = 0;
+
+  // Signed 16-bit integer, big-endian (radiod / ubersdr native format).
+  // Inbound:  int16 BE bytes → float32 = int16(BE) / 32768.0
+  // Outbound: float32 → int16 BE bytes = clamp(f * 32768.0) as big-endian int16
+  PCM_INT16_BE   = 1;
+}
+
 // ── Client → Server ───────────────────────────────────────────────────────────
 
 message AudioRequest {
@@ -55,6 +67,12 @@ message SessionConfig {
   // Mono input is expanded to stereo internally before processing and collapsed
   // back to mono in the response. All filters process stereo internally.
   int32 channels = 5;
+
+  // Wire encoding of pcm_data in AudioChunk messages (default: PCM_FLOAT32_LE).
+  // Set to PCM_INT16_BE when the client sends signed 16-bit big-endian samples
+  // (e.g. radiod / ubersdr). The server converts transparently on both ingest
+  // and egress; all internal processing remains float32 little-endian.
+  PcmEncoding pcm_encoding = 6;
 }
 
 message ParamUpdate {
