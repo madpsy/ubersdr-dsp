@@ -83,11 +83,12 @@ std::unique_ptr<IFilter> createFilter(const dsp::v1::SessionConfig& cfg,
 
     // ── BNR ──────────────────────────────────────────────────────────────────
     if (filterName == "bnr") {
-        std::string addr = getParam(cfg, "bnr-address", "localhost:8001");
+        std::string addr = getParam(cfg, "bnr-address", "maxine-bnr:8001");
         auto f = std::make_unique<BnrFilterWrapper>(addr);
         if (!f->isConnected()) {
             errOut = "bnr: failed to connect to " + addr +
-                     " (not compiled in, or server not reachable)";
+                     " (not compiled in, or server not reachable);"
+                     " set bnr-address param if the server is not at maxine-bnr:8001";
             return nullptr;
         }
         // Apply remaining params (skip "bnr-address" — already consumed)
