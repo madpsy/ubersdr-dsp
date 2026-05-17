@@ -100,7 +100,7 @@ std::pair<ParamMap, ParamMap> BnrFilterWrapper::applyParams(const ParamMap& in)
 std::vector<ParamDescriptor> BnrFilterWrapper::describe() const
 {
     return {
-        {"bnr-address", "string", "localhost:8001", "", "",    "NVIDIA Maxine NIM gRPC server address (set at session start only)", false},
+        {"bnr-address", "string", "maxine-bnr:8001", "", "",    "NVIDIA Maxine NIM gRPC server address (set at session start only)", false},
         {"intensity",   "float",  "1.0",            "0", "1", "Noise suppression intensity ratio",                                  true},
     };
 }

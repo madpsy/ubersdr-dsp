@@ -456,7 +456,7 @@ The `model` path cannot be changed at runtime; close and reopen the stream
 
 | Parameter | Type | Default | Range | Runtime safe | Description |
 |-----------|------|---------|-------|:---:|-------------|
-| `bnr-address` | string | `localhost:8001` | — | ❌ | NIM gRPC server address — set in `SessionConfig.params` only |
+| `bnr-address` | string | `maxine-bnr:8001` | — | ❌ | NIM gRPC server address — set in `SessionConfig.params` only |
 | `intensity` | float | `1.0` | 0.0–1.0 | ✅ | Noise suppression intensity ratio |
 
 Bool parameters accept: `true`, `false`, `1`, `0`, `on`, `off`.
@@ -755,9 +755,9 @@ The container exposes a gRPC endpoint on port 8001 and is ready when you see
 ### Step 7 — Use BNR
 
 Connect a gRPC client and send a `SessionConfig` with `filter: "bnr"` and
-optionally `params: { "bnr-address": "localhost:8001", "intensity": "0.8" }`.
+optionally `params: { "bnr-address": "maxine-bnr:8001", "intensity": "0.8" }`.
 
-The `bnr-address` param defaults to `localhost:8001` and can only be set at
+The `bnr-address` param defaults to `maxine-bnr:8001` and can only be set at
 session start. The `intensity` param (0.0–1.0) can be changed at runtime via
 `ParamUpdate`.
 
