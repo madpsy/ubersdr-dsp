@@ -163,9 +163,15 @@ void NvidiaBnrFilter::workerLoop()
         nvidia::maxine::bnr::v1::EnhanceAudioRequest req;
         req.set_audio_stream_data(reinterpret_cast<const char*>(frame.data()), kFrameBytes);
 
+        static int s_frameCount = 0;
+        ++s_frameCount;
+        if (s_frameCount <= 5 || s_frameCount % 500 == 0)
+            fprintf(stderr, "NvidiaBnrFilter: writing frame %d (%d bytes)\n",
+                    s_frameCount, kFrameBytes);
+
         if (!m_stream->Write(req)) {
             if (!m_stopping.load()) {
-                fprintf(stderr, "NvidiaBnrFilter: gRPC write failed\n");
+                fprintf(stderr, "NvidiaBnrFilter: gRPC write failed (frame %d)\n", s_frameCount);
                 m_connected.store(false);
                 if (onConnectionChanged) onConnectionChanged(false);
                 if (onError) onError("gRPC write failed");
@@ -173,17 +179,26 @@ void NvidiaBnrFilter::workerLoop()
             return;
         }
 
+        if (s_frameCount <= 5 || s_frameCount % 500 == 0)
+            fprintf(stderr, "NvidiaBnrFilter: write OK frame %d, waiting for Read...\n", s_frameCount);
+
         // Read denoised response (blocking, but on worker thread — not audio)
         nvidia::maxine::bnr::v1::EnhanceAudioResponse response;
         if (!m_stream->Read(&response)) {
             if (!m_stopping.load()) {
-                fprintf(stderr, "NvidiaBnrFilter: gRPC read failed\n");
+                fprintf(stderr, "NvidiaBnrFilter: gRPC read failed (frame %d)\n", s_frameCount);
                 m_connected.store(false);
                 if (onConnectionChanged) onConnectionChanged(false);
                 if (onError) onError("BNR container stream ended");
             }
             return;
         }
+
+        if (s_frameCount <= 5 || s_frameCount % 500 == 0)
+            fprintf(stderr, "NvidiaBnrFilter: Read returned frame %d, has_audio=%d size=%zu\n",
+                    s_frameCount,
+                    response.has_audio_stream_data(),
+                    response.has_audio_stream_data() ? response.audio_stream_data().size() : 0);
 
         if (response.has_audio_stream_data()) {
             const auto& data = response.audio_stream_data();
