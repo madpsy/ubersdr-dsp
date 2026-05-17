@@ -9,7 +9,6 @@ set(CMAKE_C_STANDARD 11)
 option(WITH_FFTW3      "Use FFTW3 for NR2 FFT (recommended)"        ON)
 option(WITH_SPECBLEACH "Build NR4 (libspecbleach)"                  ON)
 option(WITH_DFNR       "Build DFNR (DeepFilterNet3)"                OFF)
-option(WITH_BNR        "Build BNR (NVIDIA Maxine via gRPC client)"  OFF)
 option(WITH_GRPC_SERVER "Build gRPC server (replaces stdin/stdout)" ON)
 
 # Path to the third_party directory (defaults to local third_party/)
@@ -69,7 +68,6 @@ set(FILTER_SOURCES
     SpectralNR.cpp
     RNNoiseFilter.cpp
     Resampler.cpp
-    NvidiaBnrFilter.cpp   # always compiled; HAVE_BNR guards the gRPC client code
 )
 
 # ── r8brain (header-only) ─────────────────────────────────────────────────────
@@ -193,26 +191,6 @@ if(WITH_DFNR)
     endif()
 endif()
 
-# ── NVIDIA BNR gRPC client ────────────────────────────────────────────────────
-if(WITH_BNR)
-    # BNR needs gRPC regardless of WITH_GRPC_SERVER
-    if(NOT gRPC_FOUND AND NOT GRPC_FOUND)
-        find_package(gRPC QUIET)
-        if(NOT gRPC_FOUND)
-            find_package(PkgConfig QUIET)
-            if(PkgConfig_FOUND)
-                pkg_check_modules(GRPC grpc++ grpc)
-            endif()
-        endif()
-    endif()
-    if(NOT gRPC_FOUND AND NOT GRPC_FOUND)
-        message(WARNING "gRPC not found — BNR disabled")
-        set(WITH_BNR OFF)
-    else()
-        list(APPEND FILTER_SOURCES NvidiaBnrFilter.cpp)
-    endif()
-endif()
-
 # ── gRPC server sources ───────────────────────────────────────────────────────
 if(WITH_GRPC_SERVER)
     set(SERVER_SOURCES
@@ -223,7 +201,6 @@ if(WITH_GRPC_SERVER)
         src/filters/Rn2FilterWrapper.cpp
         src/filters/Nr4FilterWrapper.cpp
         src/filters/DfnrFilterWrapper.cpp
-        src/filters/BnrFilterWrapper.cpp
         ${PROTO_SRCS}
     )
     set(ENTRY_SOURCES ${SERVER_SOURCES})
@@ -291,22 +268,6 @@ if(WITH_DFNR)
     target_link_libraries(ubersdr-dsp PRIVATE ${DEEPFILTER_LIB})
 endif()
 
-if(WITH_BNR)
-    target_compile_definitions(ubersdr-dsp PRIVATE HAVE_BNR)
-    if(gRPC_FOUND)
-        target_link_libraries(ubersdr-dsp PRIVATE gRPC::grpc++ gRPC::grpc)
-    else()
-        target_link_libraries(ubersdr-dsp PRIVATE ${GRPC_LIBRARIES})
-    endif()
-    set(BNR_PROTO_DIR "" CACHE PATH "Directory containing bnr.grpc.pb.h and bnr.pb.h")
-    if(BNR_PROTO_DIR)
-        target_include_directories(ubersdr-dsp PRIVATE ${BNR_PROTO_DIR})
-        # Also compile the generated stub .cc files so their symbols are linked in
-        file(GLOB BNR_STUB_SRCS "${BNR_PROTO_DIR}/*.cc")
-        target_sources(ubersdr-dsp PRIVATE ${BNR_STUB_SRCS})
-    endif()
-endif()
-
 if(WITH_GRPC_SERVER)
     target_compile_definitions(ubersdr-dsp PRIVATE HAVE_GRPC_SERVER)
     if(gRPC_FOUND)
@@ -342,7 +303,6 @@ message(STATUS "  NR2  (SpectralNR)      always on")
 message(STATUS "  RN2  (RNNoise)         always on")
 message(STATUS "  NR4  (libspecbleach)   ${WITH_SPECBLEACH}")
 message(STATUS "  DFNR (DeepFilterNet3)  ${WITH_DFNR}")
-message(STATUS "  BNR  (NVIDIA Maxine)   ${WITH_BNR}")
 message(STATUS "  FFTW3                  ${WITH_FFTW3}")
 message(STATUS "")
 message(STATUS "  r8brain:               ${R8BRAIN_DIR}")

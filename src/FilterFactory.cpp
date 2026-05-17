@@ -4,7 +4,6 @@
 #include "filters/Rn2FilterWrapper.h"
 #include "filters/Nr4FilterWrapper.h"
 #include "filters/DfnrFilterWrapper.h"
-#include "filters/BnrFilterWrapper.h"
 
 // Generated protobuf header
 #include "ubersdr_dsp.pb.h"
@@ -81,25 +80,7 @@ std::unique_ptr<IFilter> createFilter(const dsp::v1::SessionConfig& cfg,
         return f;
     }
 
-    // ── BNR ──────────────────────────────────────────────────────────────────
-    if (filterName == "bnr") {
-        std::string addr = getParam(cfg, "bnr-address", "maxine-bnr:8001");
-        auto f = std::make_unique<BnrFilterWrapper>(addr);
-        if (!f->isConnected()) {
-            errOut = "bnr: failed to connect to " + addr +
-                     " (not compiled in, or server not reachable);"
-                     " set bnr-address param if the server is not at maxine-bnr:8001";
-            return nullptr;
-        }
-        // Apply remaining params (skip "bnr-address" — already consumed)
-        ParamMap initial(cfg.params().begin(), cfg.params().end());
-        initial.erase("bnr-address");
-        if (!initial.empty())
-            f->applyParams(initial);
-        return f;
-    }
-
-    errOut = "unknown filter '" + filterName + "'; valid: nr2 rn2 nr4 dfnr bnr";
+    errOut = "unknown filter '" + filterName + "'; valid: nr2 rn2 nr4 dfnr";
     return nullptr;
 }
 

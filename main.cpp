@@ -5,7 +5,7 @@
  *  writes raw 24 kHz stereo float32 PCM to stdout.
  *
  *  Usage:
- *    ubersdr-dsp --filter <nr2|rn2|nr4|dfnr|bnr> [options]
+ *    ubersdr-dsp --filter <nr2|rn2|nr4|dfnr> [options]
  *
  *  Common options:
  *    --filter  <name>     Noise reduction algorithm (required)
@@ -32,10 +32,6 @@
  *    --atten-limit <dB>    Attenuation limit 0-100 dB (default: 100)
  *    --pf-beta     <float> Post-filter beta 0-0.3 (default: 0)
  *
- *  BNR (NvidiaBnrFilter) options:
- *    --bnr-address <host:port>  gRPC server address (default: localhost:8001)
- *    --intensity   <float>      Intensity ratio 0-1 (default: 1.0)
- *
  *  RN2 (RNNoiseFilter) has no tunable parameters.
  */
 
@@ -56,19 +52,17 @@
 #  include "DeepFilterFilter.h"
 #endif
 
-#include "NvidiaBnrFilter.h"
-
 // ── Argument helpers ──────────────────────────────────────────────────────────
 
 static void usage(const char* prog)
 {
     fprintf(stderr,
-        "Usage: %s --filter <nr2|rn2|nr4|dfnr|bnr> [options]\n"
+        "Usage: %s --filter <nr2|rn2|nr4|dfnr> [options]\n"
         "\n"
         "Input/output: raw 24 kHz stereo float32 PCM on stdin/stdout\n"
         "\n"
         "Common:\n"
-        "  --filter  <name>     nr2 | rn2 | nr4 | dfnr | bnr\n"
+        "  --filter  <name>     nr2 | rn2 | nr4 | dfnr\n"
         "  --block   <samples>  Stereo frames per read (default: 960)\n"
         "  --wisdom  <path>     FFTW3 wisdom file/dir (NR2 only)\n"
         "\n"
@@ -90,11 +84,7 @@ static void usage(const char* prog)
         "DFNR:\n"
         "  --model       <path> Path to DeepFilterNet3_onnx.tar.gz\n"
         "  --atten-limit <dB>   0-100 dB (default: 100)\n"
-        "  --pf-beta     <f>    Post-filter beta (default: 0)\n"
-        "\n"
-        "BNR:\n"
-        "  --bnr-address <h:p>  gRPC server (default: localhost:8001)\n"
-        "  --intensity   <f>    0-1 (default: 1.0)\n",
+        "  --pf-beta     <f>    Post-filter beta (default: 0)\n",
         prog);
 }
 
@@ -279,62 +269,6 @@ int main(int argc, char** argv)
             if (fwrite(outBuf.data(), sizeof(float), outBuf.size(), stdout) != outBuf.size())
                 break;
         }
-        return 0;
-#endif
-    }
-
-    // ── BNR ──────────────────────────────────────────────────────────────────
-    if (strcmp(filterName, "bnr") == 0) {
-#ifndef HAVE_BNR
-        fprintf(stderr, "BNR: not compiled in (rebuild with -DHAVE_BNR)\n");
-        return 1;
-#else
-        const char* address = getArg(argc, argv, "--bnr-address", "localhost:8001");
-        float intensity = getFloat(argc, argv, "--intensity", 1.0f);
-
-        AetherSDR::NvidiaBnrFilter filter;
-        filter.setIntensityRatio(intensity);
-        filter.onError = [](const std::string& msg) {
-            fprintf(stderr, "BNR error: %s\n", msg.c_str());
-        };
-        filter.onConnectionChanged = [](bool connected) {
-            fprintf(stderr, "BNR: %s\n", connected ? "connected" : "disconnected");
-        };
-
-        if (!filter.connectToServer(address)) {
-            fprintf(stderr, "BNR: failed to connect to %s\n", address);
-            return 1;
-        }
-
-        // BNR operates at 48 kHz mono internally; the filter handles its own
-        // buffering. We feed 24 kHz stereo float32 and get back whatever is
-        // available (non-blocking). Accumulate output to match input size.
-        std::vector<float> accumulated;
-
-        while (fread(inBuf.data(), sizeof(float), stereoSamples, stdin) == (size_t)stereoSamples) {
-            // Downmix stereo → mono for BNR (it expects 48kHz mono, but we
-            // pass 24kHz stereo mono-mixed; the NIM server handles sample rate)
-            std::vector<float> mono(blockFrames);
-            for (int i = 0; i < blockFrames; ++i)
-                mono[i] = (inBuf[i * 2] + inBuf[i * 2 + 1]) * 0.5f;
-
-            auto chunk = filter.process(mono.data(), blockFrames);
-            accumulated.insert(accumulated.end(), chunk.begin(), chunk.end());
-
-            // Emit output when we have enough (duplicate mono → stereo)
-            while (static_cast<int>(accumulated.size()) >= blockFrames) {
-                std::vector<float> stereoOut(stereoSamples);
-                for (int i = 0; i < blockFrames; ++i) {
-                    stereoOut[i * 2]     = accumulated[i];
-                    stereoOut[i * 2 + 1] = accumulated[i];
-                }
-                accumulated.erase(accumulated.begin(), accumulated.begin() + blockFrames);
-                if (fwrite(stereoOut.data(), sizeof(float), stereoSamples, stdout) != (size_t)stereoSamples)
-                    goto done;
-            }
-        }
-        done:
-        filter.disconnect();
         return 0;
 #endif
     }

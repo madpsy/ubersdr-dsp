@@ -6,7 +6,6 @@
 #include "filters/Rn2FilterWrapper.h"
 #include "filters/Nr4FilterWrapper.h"
 #include "filters/DfnrFilterWrapper.h"
-#include "filters/BnrFilterWrapper.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -386,17 +385,6 @@ void DspServiceImpl::populateFilterInfo(dsp::v1::GetFiltersResponse* resp)
         addFilter(resp, "dfnr",
                   "DeepFilterNet3 — neural network denoiser"
 #ifndef HAVE_DFNR
-                  " [NOT COMPILED IN]"
-#endif
-                  ,
-                  tmp.describe());
-    }
-    // BNR
-    {
-        BnrFilterWrapper tmp(""); // don't actually connect
-        addFilter(resp, "bnr",
-                  "NVIDIA Maxine BNR — NIM denoiser"
-#ifndef HAVE_BNR
                   " [NOT COMPILED IN]"
 #endif
                   ,

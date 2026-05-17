@@ -20,7 +20,6 @@ noise reduction algorithm, and returns processed PCM on the same stream.
 | `rn2` | RNNoise — Mozilla/Xiph RNN-based suppressor | ✅ | Compiled from source; best on speech |
 | `nr4` | libspecbleach — SPP-MMSE adaptive denoiser | ✅ (default) | Requires `libfftw3f` |
 | `dfnr` | DeepFilterNet3 — neural network denoiser | opt-in | Requires pre-built Rust C-ABI library + ONNX model |
-| `bnr` | NVIDIA Maxine BNR — cloud/NIM gRPC denoiser | opt-in | Requires gRPC + NVIDIA Maxine NIM server |
 
 ---
 
@@ -44,7 +43,7 @@ Client PCM (client_rate, client_channels, pcm_encoding)
   r8brain stereo resampler: client_rate → 24000 Hz
         │
         ▼
-[Noise reduction filter]           (nr2 / rn2 / nr4 / dfnr / bnr)
+[Noise reduction filter]           (nr2 / rn2 / nr4 / dfnr)
   All filters operate on 24 kHz interleaved stereo float32
         │
         ▼
@@ -120,7 +119,6 @@ make
 
 # With optional filters
 make WITH_DFNR=ON
-make WITH_BNR=ON
 
 # Custom install prefix
 make install PREFIX=/usr
@@ -137,8 +135,7 @@ The binary is placed at `build/ubersdr-dsp`.
 cmake -S . -B build \
     -DWITH_FFTW3=ON \
     -DWITH_SPECBLEACH=ON \
-    -DWITH_DFNR=OFF \
-    -DWITH_BNR=OFF
+    -DWITH_DFNR=OFF
 cmake --build build -j$(nproc)
 ```
 
@@ -149,7 +146,6 @@ cmake --build build -j$(nproc)
 | `WITH_FFTW3` | `ON` | Use FFTW3 for NR2 (falls back to built-in radix-2 if off/not found) |
 | `WITH_SPECBLEACH` | `ON` | Build NR4 (libspecbleach) |
 | `WITH_DFNR` | `OFF` | Build DFNR (DeepFilterNet3 — requires pre-built C-ABI library) |
-| `WITH_BNR` | `OFF` | Build BNR (NVIDIA Maxine via gRPC) |
 | `AETHER_THIRD_PARTY` | `./third_party` | Path to third-party library directory |
 
 ---
@@ -181,9 +177,8 @@ docker compose -f docker/docker-compose.yml up
 
 ### What the image contains
 
-The Docker build compiles all filters (`WITH_DFNR=ON`, `WITH_BNR=ON`,
-`WITH_SPECBLEACH=ON`, `WITH_FFTW3=ON`) and produces a minimal runtime image
-containing only:
+The Docker build compiles all filters (`WITH_DFNR=ON`, `WITH_SPECBLEACH=ON`,
+`WITH_FFTW3=ON`) and produces a minimal runtime image containing only:
 
 - `/usr/local/bin/ubersdr-dsp` — the compiled binary
 - `/usr/local/lib/` — exact shared library dependencies (collected via `ldd`)
@@ -281,7 +276,7 @@ Client                                    Server
 
 ```protobuf
 message SessionConfig {
-  string filter = 1;              // "nr2" | "rn2" | "nr4" | "dfnr" | "bnr"
+  string filter = 1;              // "nr2" | "rn2" | "nr4" | "dfnr"
   int32  block  = 2;              // advisory chunk-size hint in frames (0 = use server default)
   map<string,string> params = 3;  // initial parameter values (optional)
   int32  sample_rate = 4;         // client audio sample rate in Hz (default: 24000)
@@ -389,7 +384,7 @@ message ErrorResponse {
 
 | `code` | Trigger | Stream stays open? |
 |--------|---------|:-----------------:|
-| `FILTER_INIT_FAILED` | Unknown filter name, or filter failed to initialise (not compiled in, model missing, BNR server unreachable) | No — server also closes with gRPC `INTERNAL` |
+| `FILTER_INIT_FAILED` | Unknown filter name, or filter failed to initialise (not compiled in, model missing) | No — server also closes with gRPC `INTERNAL` |
 | `INVALID_SAMPLE_RATE` | `sample_rate` is not `12000` or `24000` | No — server also closes with gRPC `INVALID_ARGUMENT` |
 | `INVALID_CHANNELS` | `channels` is not `1` or `2` | No — server also closes with gRPC `INVALID_ARGUMENT` |
 | `FILTER_CHANGE_NOT_ALLOWED` | Second `SessionConfig` sent after stream is configured | Yes |
@@ -451,13 +446,6 @@ configuration is needed when using the container.
 
 The `model` path cannot be changed at runtime; close and reopen the stream
 (with a new `SessionConfig`) to use a different model file.
-
-#### `bnr` — NVIDIA Maxine BNR (requires `WITH_BNR=ON`)
-
-| Parameter | Type | Default | Range | Runtime safe | Description |
-|-----------|------|---------|-------|:---:|-------------|
-| `bnr-address` | string | `maxine-bnr:8001` | — | ❌ | NIM gRPC server address — set in `SessionConfig.params` only |
-| `intensity` | float | `1.0` | 0.0–1.0 | ✅ | Noise suppression intensity ratio |
 
 Bool parameters accept: `true`, `false`, `1`, `0`, `on`, `off`.
 
@@ -591,7 +579,7 @@ examples/.venv/bin/python examples/mic_to_speaker.py \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--filter` | `nr2` | Filter: `nr2` `rn2` `nr4` `dfnr` `bnr` |
+| `--filter` | `nr2` | Filter: `nr2` `rn2` `nr4` `dfnr` |
 | `--server` | `localhost:50051` | ubersdr-dsp gRPC address |
 | `--rate` | `24000` | Sample rate: `12000` or `24000` Hz |
 | `--block` | `960` | Frames per chunk (960 = 40 ms at 24 kHz) |
@@ -643,21 +631,19 @@ ubersdr-dsp/
 │       ├── Nr2FilterWrapper.h/.cpp   # NR2 — SpectralNR adapter
 │       ├── Rn2FilterWrapper.h/.cpp   # RN2 — RNNoise adapter
 │       ├── Nr4FilterWrapper.h/.cpp   # NR4 — libspecbleach adapter
-│       ├── DfnrFilterWrapper.h/.cpp  # DFNR — DeepFilterNet3 adapter
-│       └── BnrFilterWrapper.h/.cpp   # BNR — NVIDIA Maxine adapter
+│       └── DfnrFilterWrapper.h/.cpp  # DFNR — DeepFilterNet3 adapter
 ├── SpectralNR.h/.cpp           # NR2 — MMSE-LSA spectral NR (from AetherSDR)
 ├── RNNoiseFilter.h/.cpp        # RN2 — RNNoise wrapper (from AetherSDR)
 ├── SpecbleachFilter.h/.cpp     # NR4 — libspecbleach wrapper (from AetherSDR)
 ├── DeepFilterFilter.h/.cpp     # DFNR — DeepFilterNet3 wrapper (from AetherSDR)
 │                               #   (internal 24↔48 kHz resampling via r8brain)
-├── NvidiaBnrFilter.h/.cpp      # BNR — NVIDIA Maxine gRPC wrapper (from AetherSDR)
 ├── Resampler.h/.cpp            # r8brain wrapper (session-level 12↔24 kHz resampling)
 ├── CMakeLists.txt              # Build system
 ├── Makefile                    # Convenience wrapper around CMake
 ├── docker.sh                   # Docker build/push/run helper
 ├── docker/
 │   ├── Dockerfile              # Multi-stage build (builder + minimal runtime)
-│   ├── docker-compose.yml      # Compose file (ubersdr-dsp + optional NVIDIA BNR NIM)
+│   ├── docker-compose.yml      # Compose file
 │   └── .dockerignore           # Excludes build artefacts; allows libdeepfilter.a
 └── third_party/
     ├── r8brain/                # Header-only resampler
@@ -671,156 +657,6 @@ ubersdr-dsp/
 
 ---
 
-## BNR — NVIDIA Maxine Background Noise Removal
-
-BNR is **not compiled in by default** (`WITH_BNR=OFF`). Requesting `filter: "bnr"`
-in a `SessionConfig` without rebuilding returns a `FILTER_INIT_FAILED` error.
-
-BNR has no local model file. It is a gRPC client to NVIDIA's Maxine NIM
-microservice, which runs the GPU-accelerated model inside a Docker container.
-
-### Requirements
-
-- NVIDIA GPU (Turing / Ampere or newer recommended)
-- Docker with NVIDIA Container Toolkit
-- Free NGC account: https://ngc.nvidia.com
-- gRPC + protobuf development libraries
-
-### Step 1 — Install gRPC
-
-```bash
-apt install libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
-```
-
-### Step 2 — Get the NVIDIA Maxine `.proto` file
-
-The NIM container page is at:
-https://catalog.ngc.nvidia.com/orgs/nim/teams/nvidia/containers/maxine-bnr?version=1.0.0
-
-The `.proto` file is included in the container image and also available in the
-Maxine SDK at https://developer.nvidia.com/maxine-getting-started (NGC account
-required). It is at `maxine-sdk/protos/bnr.proto` and defines the
-`nvidia.maxine.bnr.v1` package with the `MaxineBNR` service and
-`EnhanceAudioRequest` / `EnhanceAudioResponse` messages.
-
-### Step 3 — Generate C++ stubs
-
-```bash
-mkdir -p bnr_stubs
-protoc --grpc_out=./bnr_stubs \
-       --cpp_out=./bnr_stubs \
-       --plugin=protoc-gen-grpc=$(which grpc_cpp_plugin) \
-       bnr.proto
-# Produces: bnr.pb.h  bnr.pb.cc  bnr.grpc.pb.h  bnr.grpc.pb.cc
-```
-
-### Step 4 — Rebuild with BNR enabled
-
-```bash
-make WITH_BNR=ON BNR_PROTO_DIR=$(pwd)/bnr_stubs rebuild
-```
-
-Or with CMake directly:
-
-```bash
-cmake -S . -B build \
-    -DWITH_BNR=ON \
-    -DBNR_PROTO_DIR=$(pwd)/bnr_stubs
-cmake --build build -j$(nproc)
-```
-
-### Step 5 — Get an NGC API key
-
-1. Sign up for a free account at https://ngc.nvidia.com
-2. Accept the NVIDIA AI Enterprise / NIM terms when prompted
-3. Top-right menu → **Setup** → **Generate API Key** — copy it (shown once)
-
-### Step 6 — Pull and run the NIM container
-
-```bash
-# Username is literally "$oauthtoken" (not a shell variable)
-docker login nvcr.io
-# Username: $oauthtoken
-# Password: <your NGC API key>
-
-docker pull nvcr.io/nim/nvidia/maxine-bnr:1.0.0
-
-docker run --gpus all --rm -p 8001:8001 \
-    nvcr.io/nim/nvidia/maxine-bnr:1.0.0
-```
-
-The container exposes a gRPC endpoint on port 8001 and is ready when you see
-`Server listening on 0.0.0.0:8001`.
-
-### Step 7 — Use BNR
-
-Connect a gRPC client and send a `SessionConfig` with `filter: "bnr"` and
-optionally `params: { "bnr-address": "maxine-bnr:8001", "intensity": "0.8" }`.
-
-The `bnr-address` param defaults to `maxine-bnr:8001` and can only be set at
-session start. The `intensity` param (0.0–1.0) can be changed at runtime via
-`ParamUpdate`.
-
-#### Worker thread mode (`BNR_WORKER_MODE`)
-
-The `NvidiaBnrFilter` worker can run in three modes, selected via the
-`BNR_WORKER_MODE` environment variable on the `ubersdr-dsp` process:
-
-| Value | Mode | Description |
-|-------|------|-------------|
-| unset or `batch` | **Batch** (default) | Accumulates 200 ms of audio (20 × 10 ms frames), opens a fresh gRPC stream, sends all frames, calls `WritesDone()`, drains all responses, then closes the stream and repeats. Matches the official NVIDIA NIM Python client protocol exactly. Introduces ~100 ms average latency. |
-| `concurrent` | **Concurrent** | Two threads — one sends frames, one reads responses on a persistent stream. Does **not** call `WritesDone()`; NIM returns empty responses in this mode. Kept for debugging. |
-| `legacy` | **Legacy** | Single thread — alternating `Write→Read` per frame on a persistent stream. Original behaviour. Kept for debugging. |
-
-To select a mode in Docker:
-```bash
-docker run ... -e BNR_WORKER_MODE=batch   madpsy/ubersdr-dsp:latest   # default
-docker run ... -e BNR_WORKER_MODE=concurrent madpsy/ubersdr-dsp:latest # debug
-docker run ... -e BNR_WORKER_MODE=legacy  madpsy/ubersdr-dsp:latest   # debug
-```
-
-### How it works
-
-The NIM BNR container requires a complete audio segment per RPC invocation —
-it does not process frames individually in real time. `NvidiaBnrFilter` uses
-**batch mode** (default): it accumulates 200 ms of audio (20 × 10 ms frames),
-opens a fresh gRPC stream, sends the config message followed by all 20 frames
-as raw float32 chunks, calls `WritesDone()`, then drains all denoised float32
-response chunks before closing the stream and repeating.
-
-This matches the official NIM Python client's streaming protocol exactly:
-the Python client sends 480-sample (10 ms) float32 chunks from a decoded WAV
-file, the generator exhausts (triggering `WritesDone()`), then all responses
-are collected.
-
-`BnrFilterWrapper` handles the 24 kHz stereo ↔ 48 kHz mono conversion
-internally. Both directions are exact 2:1 integer ratios, so no r8brain
-resampler is used:
-
-```
-24 kHz stereo float32 (from pipeline)
-        │
-        ▼
-[L+R downmix + 2:1 sample duplication → 48 kHz mono]   integer ratio, no r8brain
-        │
-        ▼
-[NvidiaBnrFilter — batch mode]
-  accumulate 200ms → open stream → send config + 20×480-sample float32 chunks
-  → WritesDone() → drain denoised float32 responses → close stream → repeat
-        │
-        ▼
-[2:1 pair-averaging → 24 kHz mono + L=R expand → stereo]   integer ratio, no r8brain
-        │
-        ▼
-24 kHz stereo float32 (back to pipeline)
-```
-
-Average latency: ~100 ms (half the 200 ms batch window).
-The session-level pipeline then handles any further 24 ↔ 12 kHz resampling
-and mono/stereo conversion.
-
----
-
 ## Licence
 
 The filter implementations are derived from AetherSDR and their respective
@@ -831,4 +667,3 @@ upstream projects:
 - **libspecbleach** — GPL-2.0-or-later
 - **DeepFilterNet3** — MIT
 - **r8brain** — MIT
-- **NVIDIA Maxine BNR** — proprietary (NVIDIA SDK)
