@@ -1,6 +1,5 @@
 #include "NvidiaBnrFilter.h"
 
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -182,74 +181,14 @@ std::vector<float> NvidiaBnrFilter::process(const float* samples, int numSamples
     return result;
 }
 
-// ── WAV file helpers ──────────────────────────────────────────────────────────
-
-// Write a little-endian 16-bit value into buf at offset.
-static void writeLE16(std::vector<uint8_t>& buf, size_t offset, uint16_t v)
-{
-    buf[offset]     = static_cast<uint8_t>(v & 0xFF);
-    buf[offset + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-}
-
-// Write a little-endian 32-bit value into buf at offset.
-static void writeLE32(std::vector<uint8_t>& buf, size_t offset, uint32_t v)
-{
-    buf[offset]     = static_cast<uint8_t>(v & 0xFF);
-    buf[offset + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-    buf[offset + 2] = static_cast<uint8_t>((v >> 16) & 0xFF);
-    buf[offset + 3] = static_cast<uint8_t>((v >> 24) & 0xFF);
-}
-
-// Build a complete WAV file (header + float32 PCM data) in memory.
-// Format: RIFF/WAVE, PCM IEEE float (format 3), mono, 48000 Hz, 32-bit.
-static std::vector<uint8_t> buildWavFile(const float* samples, int numSamples)
-{
-    // WAV header layout (44 bytes for IEEE float with 16-byte fmt chunk):
-    //   RIFF chunk:  "RIFF" (4) + file_size-8 (4) + "WAVE" (4)
-    //   fmt  chunk:  "fmt " (4) + chunk_size=16 (4) + audio_format=3 (2) +
-    //                num_channels=1 (2) + sample_rate=48000 (4) +
-    //                byte_rate=192000 (4) + block_align=4 (2) + bits_per_sample=32 (2)
-    //   data chunk:  "data" (4) + data_size (4) + [raw float32 samples]
-    static constexpr int kHeaderSize = 44;
-    const uint32_t dataSize  = static_cast<uint32_t>(numSamples) * sizeof(float);
-    const uint32_t fileSize  = kHeaderSize - 8 + dataSize; // RIFF chunk size = total - 8
-
-    std::vector<uint8_t> wav(kHeaderSize + dataSize);
-
-    // RIFF chunk
-    wav[0] = 'R'; wav[1] = 'I'; wav[2] = 'F'; wav[3] = 'F';
-    writeLE32(wav, 4, fileSize);
-    wav[8] = 'W'; wav[9] = 'A'; wav[10] = 'V'; wav[11] = 'E';
-
-    // fmt chunk
-    wav[12] = 'f'; wav[13] = 'm'; wav[14] = 't'; wav[15] = ' ';
-    writeLE32(wav, 16, 16);                // chunk size = 16 (no extension)
-    writeLE16(wav, 20, 3);                 // audio format = 3 (IEEE float)
-    writeLE16(wav, 22, 1);                 // num channels = 1 (mono)
-    writeLE32(wav, 24, 48000u);            // sample rate = 48000
-    writeLE32(wav, 28, 48000u * 4u);       // byte rate = 48000 * 4
-    writeLE16(wav, 32, 4);                 // block align = 4 bytes
-    writeLE16(wav, 34, 32);               // bits per sample = 32
-
-    // data chunk
-    wav[36] = 'd'; wav[37] = 'a'; wav[38] = 't'; wav[39] = 'a';
-    writeLE32(wav, 40, dataSize);
-
-    // Copy float32 samples (already little-endian on x86/ARM)
-    std::memcpy(wav.data() + kHeaderSize,
-                reinterpret_cast<const uint8_t*>(samples),
-                dataSize);
-
-    return wav;
-}
-
 // ── Batch mode ────────────────────────────────────────────────────────────────
-// Matches the official NIM Python client non-streaming protocol:
-//   open stream → send config → send WAV file bytes in 64KB chunks → WritesDone()
-//   → drain all responses (WAV file bytes) → close stream → repeat
+// Matches the official NIM Python client streaming protocol exactly:
+//   open stream → send config → send raw float32 chunks (10ms each) → WritesDone()
+//   → drain all responses (raw float32 chunks) → close stream → repeat
 //
-// NIM saves all incoming audio_stream_data bytes to "input.wav" and parses it
-// with libsoundfile. We must send a complete WAV file (header + PCM) per batch.
+// The Python client uses sf.read() to decode a WAV file to normalised float32
+// [-1.0, 1.0], then sends 480-sample (10ms) chunks as raw bytes. NIM's streaming
+// path accepts raw float32 PCM directly (no WAV header needed).
 
 std::unique_ptr<grpc::ClientReaderWriter<
     nvidia::maxine::bnr::v1::EnhanceAudioRequest,
@@ -275,8 +214,9 @@ NvidiaBnrFilter::openStream(grpc::ClientContext& ctx)
 
 void NvidiaBnrFilter::batchLoop()
 {
-    static constexpr int kBatchSamples  = kBatchFrames * kFrameSamples; // 9600 samples = 200ms
-    static constexpr int kChunkBytes    = 64 * 1024;                    // 64KB chunks (Python client default)
+    // Batch size: accumulate enough frames to match the Python client's behaviour
+    // of sending a complete audio file. We use kBatchFrames × 10ms frames.
+    static constexpr int kBatchSamples = kBatchFrames * kFrameSamples; // 9600 samples = 200ms
 
     int batchCount = 0;
 
@@ -298,13 +238,7 @@ void NvidiaBnrFilter::batchLoop()
 
         ++batchCount;
 
-        // ── 2. Build a complete WAV file in memory ────────────────────────────
-        // NIM saves all audio_stream_data bytes to "input.wav" and parses with
-        // libsoundfile — we must send a valid WAV file, not raw PCM.
-        std::vector<uint8_t> wavFile = buildWavFile(batch.data(),
-                                                    static_cast<int>(batch.size()));
-
-        // ── 3. Open a fresh stream for this batch ─────────────────────────────
+        // ── 2. Open a fresh stream for this batch ─────────────────────────────
         grpc::ClientContext ctx;
         auto stream = openStream(ctx);
         if (!stream) {
@@ -318,54 +252,62 @@ void NvidiaBnrFilter::batchLoop()
             break;
         }
 
-        // ── 4. Send WAV file in 64KB chunks (matches Python non-streaming client) ─
+        // ── 3. Send batch as 10ms raw float32 chunks ──────────────────────────
+        // Matches Python streaming: data.tobytes() on a 480-sample float32 array.
         bool writeFailed = false;
-        const uint8_t* ptr = wavFile.data();
-        int remaining = static_cast<int>(wavFile.size());
-
-        while (remaining > 0 && !m_stopping.load()) {
-            const int chunkSize = std::min(remaining, kChunkBytes);
+        for (int i = 0; i < kBatchFrames && !m_stopping.load(); ++i) {
             nvidia::maxine::bnr::v1::EnhanceAudioRequest req;
-            req.set_audio_stream_data(reinterpret_cast<const char*>(ptr), chunkSize);
+            const float* frameStart = batch.data() + i * kFrameSamples;
+            req.set_audio_stream_data(
+                reinterpret_cast<const char*>(frameStart), kFrameBytes);
 
             if (!stream->Write(req)) {
-                fprintf(stderr, "NvidiaBnrFilter: batchLoop Write failed (batch %d)\n",
-                        batchCount);
+                fprintf(stderr, "NvidiaBnrFilter: batchLoop Write failed (batch %d frame %d)\n",
+                        batchCount, i);
                 writeFailed = true;
                 break;
             }
-            ptr       += chunkSize;
-            remaining -= chunkSize;
         }
 
         if (writeFailed || m_stopping.load()) break;
 
-        // ── 5. Signal end-of-file (Python generator exhausts here) ────────────
+        // ── 4. Signal end-of-batch (Python generator exhausts → WritesDone()) ─
         stream->WritesDone();
 
-        // ── 6. Drain all responses ────────────────────────────────────────────
-        // NIM responds with the denoised audio as WAV file bytes.
+        // ── 5. Drain all responses ────────────────────────────────────────────
+        // NIM responds with raw float32 chunks matching the input frame size.
         nvidia::maxine::bnr::v1::EnhanceAudioResponse response;
         int responseCount = 0;
-        std::vector<uint8_t> responseBytes;
+        int audioSamples = 0;
 
         while (stream->Read(&response)) {
             ++responseCount;
             if (response.has_audio_stream_data()) {
                 const auto& data = response.audio_stream_data();
-                responseBytes.insert(responseBytes.end(),
-                                     data.begin(), data.end());
+                const float* fptr = reinterpret_cast<const float*>(data.data());
+                const int fcount = static_cast<int>(data.size()) / sizeof(float);
+                audioSamples += fcount;
+
+                std::lock_guard<std::mutex> lock(m_outMutex);
+                m_outBuf.insert(m_outBuf.end(), fptr, fptr + fcount);
+
+                // Cap output buffer at ~2 seconds
+                constexpr int maxOutSamples = kFrameSamples * 200;
+                if (static_cast<int>(m_outBuf.size()) > maxOutSamples)
+                    m_outBuf.erase(m_outBuf.begin(),
+                                   m_outBuf.begin() + (m_outBuf.size() - maxOutSamples));
             }
         }
 
-        // ── 7. Check final stream status ──────────────────────────────────────
+        // ── 6. Check final stream status ──────────────────────────────────────
         grpc::Status status = stream->Finish();
 
         if (batchCount <= 3 || batchCount % 100 == 0) {
             fprintf(stderr,
-                    "NvidiaBnrFilter: batch %d — sent %zu WAV bytes, got %d responses, "
-                    "%zu response bytes, gRPC status=%d\n",
-                    batchCount, wavFile.size(), responseCount, responseBytes.size(),
+                    "NvidiaBnrFilter: batch %d — sent %d frames (%d samples), "
+                    "got %d responses, %d audio samples, gRPC status=%d\n",
+                    batchCount, kBatchFrames, kBatchSamples,
+                    responseCount, audioSamples,
                     static_cast<int>(status.error_code()));
         }
 
@@ -376,28 +318,7 @@ void NvidiaBnrFilter::batchLoop()
                     batchCount,
                     static_cast<int>(status.error_code()),
                     status.error_message().c_str());
-            continue; // try next batch
-        }
-
-        // ── 8. Parse response WAV bytes → float32 samples ─────────────────────
-        // NIM returns a WAV file. Skip the 44-byte header and read float32 PCM.
-        static constexpr int kWavHeaderSize = 44;
-        if (static_cast<int>(responseBytes.size()) > kWavHeaderSize) {
-            const uint8_t* audioStart = responseBytes.data() + kWavHeaderSize;
-            const int audioBytes = static_cast<int>(responseBytes.size()) - kWavHeaderSize;
-            const int fcount = audioBytes / static_cast<int>(sizeof(float));
-
-            if (fcount > 0) {
-                const float* fptr = reinterpret_cast<const float*>(audioStart);
-                std::lock_guard<std::mutex> lock(m_outMutex);
-                m_outBuf.insert(m_outBuf.end(), fptr, fptr + fcount);
-
-                // Cap output buffer at ~2 seconds
-                constexpr int maxOutSamples = kFrameSamples * 200;
-                if (static_cast<int>(m_outBuf.size()) > maxOutSamples)
-                    m_outBuf.erase(m_outBuf.begin(),
-                                   m_outBuf.begin() + (m_outBuf.size() - maxOutSamples));
-            }
+            // Non-fatal: continue with next batch
         }
     }
 
