@@ -214,11 +214,27 @@ void NvidiaBnrFilter::recvLoop()
 {
     // Continuously reads responses from NIM and pushes denoised audio to m_outBuf.
     // Runs concurrently with sendLoop — matches the official NIM client pattern.
+    fprintf(stderr, "NvidiaBnrFilter: recvLoop started, about to call Read() #1\n");
+
     nvidia::maxine::bnr::v1::EnhanceAudioResponse response;
+    int recvCount = 0;
+
     while (!m_stopping.load()) {
+        // Log before blocking Read() so we can tell if it never returns
+        if (recvCount == 0) {
+            fprintf(stderr, "NvidiaBnrFilter: recvLoop blocking on Read() #1...\n");
+        }
+
         if (!m_stream->Read(&response)) {
             if (!m_stopping.load()) {
-                fprintf(stderr, "NvidiaBnrFilter: recvLoop read failed\n");
+                // Get the final gRPC status for diagnosis
+                grpc::Status status = m_stream->Finish();
+                fprintf(stderr,
+                        "NvidiaBnrFilter: recvLoop Read() returned false after %d responses "
+                        "(gRPC status code=%d msg=\"%s\")\n",
+                        recvCount,
+                        static_cast<int>(status.error_code()),
+                        status.error_message().c_str());
                 m_connected.store(false);
                 if (onConnectionChanged) onConnectionChanged(false);
                 if (onError) onError("BNR container stream ended");
@@ -226,10 +242,21 @@ void NvidiaBnrFilter::recvLoop()
             return;
         }
 
-        if (response.has_audio_stream_data()) {
-            const auto& data = response.audio_stream_data();
-            const float* fptr = reinterpret_cast<const float*>(data.data());
-            const int fcount = static_cast<int>(data.size()) / sizeof(float);
+        ++recvCount;
+        const bool hasAudio = response.has_audio_stream_data();
+        const bool hasConfig = response.has_config();
+        const size_t audioSize = hasAudio ? response.audio_stream_data().size() : 0;
+
+        // Log first 5 responses and every 500th after that
+        if (recvCount <= 5 || recvCount % 500 == 0) {
+            fprintf(stderr,
+                    "NvidiaBnrFilter: recvLoop response #%d — has_audio=%d size=%zu has_config=%d\n",
+                    recvCount, hasAudio ? 1 : 0, audioSize, hasConfig ? 1 : 0);
+        }
+
+        if (hasAudio) {
+            const float* fptr = reinterpret_cast<const float*>(response.audio_stream_data().data());
+            const int fcount = static_cast<int>(audioSize) / sizeof(float);
 
             std::lock_guard<std::mutex> lock(m_outMutex);
             m_outBuf.insert(m_outBuf.end(), fptr, fptr + fcount);
@@ -241,6 +268,8 @@ void NvidiaBnrFilter::recvLoop()
                                m_outBuf.begin() + (m_outBuf.size() - maxOutSamples));
         }
     }
+    fprintf(stderr, "NvidiaBnrFilter: recvLoop exiting (stopping flag set), %d responses received\n",
+            recvCount);
 }
 
 // ── Legacy mode: single thread, alternating Write→Read ───────────────────────
