@@ -781,13 +781,20 @@ docker run ... -e BNR_WORKER_MODE=legacy  madpsy/ubersdr-dsp:latest   # debug
 
 ### How it works
 
-BNR streams **480-sample (10 ms) frames of 48 kHz mono float32** to the NIM
-server via a bidirectional gRPC stream and receives denoised audio back.
+The NIM BNR container is a **file-processing** service, not a true real-time
+frame-in/frame-out pipeline. It saves all incoming `audio_stream_data` bytes
+to `input.wav` and parses them with libsoundfile. The client must send a
+complete, valid WAV file per RPC invocation.
+
+`NvidiaBnrFilter` uses **batch mode** (default): it accumulates 200 ms of
+audio (20 × 10 ms frames), builds a complete WAV file in memory (44-byte
+RIFF/WAVE header + IEEE float32 PCM), sends it in 64 KB chunks, calls
+`WritesDone()`, then reads the denoised WAV file back from NIM's responses.
+This matches the official NIM Python client's non-streaming protocol exactly.
 
 `BnrFilterWrapper` handles the 24 kHz stereo ↔ 48 kHz mono conversion
 internally. Both directions are exact 2:1 integer ratios, so no r8brain
-resampler is used — this avoids startup delay that would stall the async
-NIM pipeline:
+resampler is used:
 
 ```
 24 kHz stereo float32 (from pipeline)
@@ -796,7 +803,8 @@ NIM pipeline:
 [L+R downmix + 2:1 sample duplication → 48 kHz mono]   integer ratio, no r8brain
         │
         ▼
-[NvidiaBnrFilter]   async gRPC to NIM — 480-sample frames @ 48 kHz
+[NvidiaBnrFilter — batch mode]
+  accumulate 200ms → build WAV file → send to NIM → receive denoised WAV → decode
         │
         ▼
 [2:1 pair-averaging → 24 kHz mono + L=R expand → stereo]   integer ratio, no r8brain
@@ -805,6 +813,7 @@ NIM pipeline:
 24 kHz stereo float32 (back to pipeline)
 ```
 
+Average latency: ~100 ms (half the 200 ms batch window).
 The session-level pipeline then handles any further 24 ↔ 12 kHz resampling
 and mono/stereo conversion.
 
