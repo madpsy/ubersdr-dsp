@@ -767,28 +767,28 @@ BNR streams **480-sample (10 ms) frames of 48 kHz mono float32** to the NIM
 server via a bidirectional gRPC stream and receives denoised audio back.
 
 `BnrFilterWrapper` handles the 24 kHz stereo ↔ 48 kHz mono conversion
-internally using r8brain resamplers (the same library used by the session
-pipeline and DFNR):
+internally. Both directions are exact 2:1 integer ratios, so no r8brain
+resampler is used — this avoids startup delay that would stall the async
+NIM pipeline:
 
 ```
 24 kHz stereo float32 (from pipeline)
         │
         ▼
-[Stereo → Mono downmix + upsample to 48 kHz]   r8brain
+[L+R downmix + 2:1 sample duplication → 48 kHz mono]   integer ratio, no r8brain
         │
         ▼
 [NvidiaBnrFilter]   async gRPC to NIM — 480-sample frames @ 48 kHz
         │
         ▼
-[Downsample to 24 kHz + Mono → Stereo expand]  r8brain
+[2:1 pair-averaging → 24 kHz mono + L=R expand → stereo]   integer ratio, no r8brain
         │
         ▼
 24 kHz stereo float32 (back to pipeline)
 ```
 
 The session-level pipeline then handles any further 24 ↔ 12 kHz resampling
-and mono/stereo conversion — you feed and receive the same format as all
-other filters regardless of client sample rate or channel count.
+and mono/stereo conversion.
 
 ---
 

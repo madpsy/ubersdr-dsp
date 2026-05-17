@@ -15,8 +15,6 @@ static bool parseFloat(const std::string& s, float& out)
 // ── BnrFilterWrapper ──────────────────────────────────────────────────────────
 
 BnrFilterWrapper::BnrFilterWrapper(const std::string& bnrAddress)
-    : m_up(std::make_unique<AetherSDR::Resampler>(24000, 48000))
-    , m_down(std::make_unique<AetherSDR::Resampler>(48000, 24000))
 {
     m_filter.onError = [](const std::string& msg) {
         fprintf(stderr, "BNR error: %s\n", msg.c_str());
@@ -52,25 +50,45 @@ std::vector<float> BnrFilterWrapper::process(const float* pcm, int stereoFrames)
 #ifndef HAVE_BNR
     return std::vector<float>(pcm, pcm + needed);
 #else
-    // 1. Upsample 24 kHz stereo → 48 kHz mono via r8brain.
-    //    processStereoToMono downmixes L+R and resamples in one pass.
-    std::vector<float> mono48k = m_up->processStereoToMono(pcm, stereoFrames);
+    // 1. Convert 24 kHz stereo → 48 kHz mono.
+    //    24→48 kHz is an exact 2:1 ratio: duplicate each downmixed sample.
+    //    No r8brain resampler — avoids startup delay that would stall the
+    //    async NIM pipeline (worker thread would have nothing to send).
+    std::vector<float> mono48k;
+    mono48k.reserve(static_cast<size_t>(stereoFrames) * 2);
+    for (int i = 0; i < stereoFrames; ++i) {
+        const float s = (pcm[i * 2] + pcm[i * 2 + 1]) * 0.5f;  // L+R downmix
+        mono48k.push_back(s);  // sample at t
+        mono48k.push_back(s);  // duplicate for t+0.5 (nearest-neighbour 2:1)
+    }
 
     // 2. Push 48 kHz mono samples into NvidiaBnrFilter (non-blocking).
-    //    The filter's worker thread sends them to the NIM server and
-    //    accumulates denoised responses in its output buffer.
+    //    The filter's worker thread sends 480-sample frames to the NIM server
+    //    and accumulates denoised responses in its output buffer.
     std::vector<float> denoised48k = m_filter.process(mono48k.data(),
                                                        static_cast<int>(mono48k.size()));
 
-    // 3. Downsample any returned 48 kHz mono → 24 kHz stereo and accumulate.
+    // 3. Convert returned 48 kHz mono → 24 kHz stereo.
+    //    48→24 kHz is an exact 2:1 ratio: average pairs of samples.
+    //    No r8brain resampler — produces output immediately, no startup delay.
     if (!denoised48k.empty()) {
-        std::vector<float> stereo24k = m_down->processMonoToStereo(
-            denoised48k.data(), static_cast<int>(denoised48k.size()));
-        m_outAccum.insert(m_outAccum.end(), stereo24k.begin(), stereo24k.end());
+        const int n48 = static_cast<int>(denoised48k.size());
+        for (int i = 0; i + 1 < n48; i += 2) {
+            const float s = (denoised48k[i] + denoised48k[i + 1]) * 0.5f;
+            m_outAccum.push_back(s);  // L
+            m_outAccum.push_back(s);  // R
+        }
+    }
+
+    // Infrequent diagnostic log — shows whether NIM is returning audio
+    static int s_callCount = 0;
+    if (++s_callCount <= 10 || s_callCount % 200 == 0) {
+        fprintf(stderr, "BNR[%d]: in=%d mono48k=%zu nim_out=%zu accum=%zu\n",
+                s_callCount, stereoFrames,
+                mono48k.size(), denoised48k.size(), m_outAccum.size());
     }
 
     // 4. Return exactly stereoFrames * 2 samples when we have enough.
-    //    This keeps the output frame count consistent with all other filters.
     if (static_cast<int>(m_outAccum.size()) >= needed) {
         std::vector<float> result(m_outAccum.begin(), m_outAccum.begin() + needed);
         m_outAccum.erase(m_outAccum.begin(), m_outAccum.begin() + needed);
@@ -78,8 +96,6 @@ std::vector<float> BnrFilterWrapper::process(const float* pcm, int stereoFrames)
     }
 
     // Not enough output yet (NIM round-trip latency during startup).
-    // Return silence to maintain timing — this only happens for the first
-    // few frames while the pipeline fills.
     return std::vector<float>(needed, 0.0f);
 #endif
 }
