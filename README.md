@@ -761,19 +761,22 @@ The `bnr-address` param defaults to `maxine-bnr:8001` and can only be set at
 session start. The `intensity` param (0.0–1.0) can be changed at runtime via
 `ParamUpdate`.
 
-#### Worker thread mode (`BNR_LEGACY_MODE`)
+#### Worker thread mode (`BNR_WORKER_MODE`)
 
-The `NvidiaBnrFilter` worker can run in two modes, selected via the
-`BNR_LEGACY_MODE` environment variable on the `ubersdr-dsp` process:
+The `NvidiaBnrFilter` worker can run in three modes, selected via the
+`BNR_WORKER_MODE` environment variable on the `ubersdr-dsp` process:
 
 | Value | Mode | Description |
 |-------|------|-------------|
-| unset or `0` | **Default** | Two threads — one sends frames, one reads responses concurrently. Matches the official NVIDIA NIM Python client pattern. |
-| `1` | **Legacy** | Single thread — alternating `Write→Read` per frame. Original behaviour; may cause NIM to return empty responses. |
+| unset or `batch` | **Batch** (default) | Accumulates 200 ms of audio (20 × 10 ms frames), opens a fresh gRPC stream, sends all frames, calls `WritesDone()`, drains all responses, then closes the stream and repeats. Matches the official NVIDIA NIM Python client protocol exactly. Introduces ~100 ms average latency. |
+| `concurrent` | **Concurrent** | Two threads — one sends frames, one reads responses on a persistent stream. Does **not** call `WritesDone()`; NIM returns empty responses in this mode. Kept for debugging. |
+| `legacy` | **Legacy** | Single thread — alternating `Write→Read` per frame on a persistent stream. Original behaviour. Kept for debugging. |
 
-To enable legacy mode in Docker:
+To select a mode in Docker:
 ```bash
-docker run ... -e BNR_LEGACY_MODE=1 madpsy/ubersdr-dsp:latest
+docker run ... -e BNR_WORKER_MODE=batch   madpsy/ubersdr-dsp:latest   # default
+docker run ... -e BNR_WORKER_MODE=concurrent madpsy/ubersdr-dsp:latest # debug
+docker run ... -e BNR_WORKER_MODE=legacy  madpsy/ubersdr-dsp:latest   # debug
 ```
 
 ### How it works

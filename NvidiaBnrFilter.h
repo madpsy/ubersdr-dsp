@@ -9,6 +9,7 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
 #include <grpcpp/grpcpp.h>
 #include "bnr.grpc.pb.h"
 #endif
@@ -16,19 +17,27 @@
 namespace AetherSDR {
 
 // gRPC client for NVIDIA NIM BNR (Background Noise Removal).
-// All gRPC I/O runs on dedicated worker thread(s) to avoid blocking
+// All gRPC I/O runs on a dedicated worker thread to avoid blocking
 // the audio callback. The audio thread pushes samples into an input
 // buffer via process(), and reads denoised samples back.
 //
-// Two worker modes (selected at runtime via BNR_LEGACY_MODE env var):
+// Three worker modes (selected at runtime via BNR_WORKER_MODE env var):
 //
-//   Default (BNR_LEGACY_MODE unset or 0):
-//     Two threads — one sends frames, one reads responses concurrently.
-//     Matches the official NIM Python client's concurrent send/receive pattern.
+//   batch (default, BNR_WORKER_MODE unset or "batch"):
+//     Accumulates kBatchFrames (200ms) of audio, then opens a new gRPC
+//     stream, sends all frames, calls WritesDone(), drains all responses,
+//     and closes the stream. Repeats for the next batch.
+//     Matches the official NIM Python client's protocol exactly.
+//     Introduces ~100ms average latency (half the 200ms batch window).
 //
-//   Legacy (BNR_LEGACY_MODE=1):
-//     Single thread — alternating Write→Read per frame (original behaviour).
-//     May cause NIM to return empty responses if it buffers frames internally.
+//   concurrent (BNR_WORKER_MODE=concurrent):
+//     Two threads — one sends frames, one reads responses concurrently
+//     on a persistent stream. Does NOT call WritesDone(). NIM returns
+//     empty responses in this mode (kept for debugging).
+//
+//   legacy (BNR_WORKER_MODE=legacy):
+//     Single thread — alternating Write→Read per frame on a persistent
+//     stream. Original behaviour (kept for debugging).
 //
 // When built without HAVE_BNR, all methods are no-ops.
 class NvidiaBnrFilter {
@@ -55,38 +64,52 @@ private:
     float m_intensityRatio{1.0f};
 
 #ifdef HAVE_BNR
-    // ── shared by both modes ──────────────────────────────────────────────────
-    void workerLoop();       // legacy: single thread, alternating Write→Read
-    void sendLoop();         // default: dedicated send thread
-    void recvLoop();         // default: dedicated receive thread
+    enum class WorkerMode { Batch, Concurrent, Legacy };
+
+    void batchLoop();    // default: per-batch stream open/send/WritesDone/recv/close
+    void sendLoop();     // concurrent: dedicated send thread (persistent stream)
+    void recvLoop();     // concurrent: dedicated recv thread (persistent stream)
+    void workerLoop();   // legacy: single thread, alternating Write→Read
+
+    // Helper used by batchLoop to open a fresh stream and send the initial config.
+    // Returns nullptr on failure.
+    std::unique_ptr<grpc::ClientReaderWriter<
+        nvidia::maxine::bnr::v1::EnhanceAudioRequest,
+        nvidia::maxine::bnr::v1::EnhanceAudioResponse>>
+    openStream(grpc::ClientContext& ctx);
 
     std::shared_ptr<grpc::Channel> m_channel;
     std::unique_ptr<nvidia::maxine::bnr::v1::MaxineBNR::Stub> m_stub;
+
+    // Used by concurrent and legacy modes (persistent stream)
     std::unique_ptr<grpc::ClientContext> m_context;
     std::unique_ptr<grpc::ClientReaderWriter<
         nvidia::maxine::bnr::v1::EnhanceAudioRequest,
         nvidia::maxine::bnr::v1::EnhanceAudioResponse>> m_stream;
 
+    std::thread m_batchThread;    // batch mode
     std::thread m_workerThread;   // legacy mode
-    std::thread m_sendThread;     // default mode
-    std::thread m_recvThread;     // default mode
+    std::thread m_sendThread;     // concurrent mode
+    std::thread m_recvThread;     // concurrent mode
 
     std::atomic<bool> m_connected{false};
     std::atomic<bool> m_stopping{false};
     std::atomic<bool> m_configDirty{false};
-    bool m_legacyMode{false};     // set from BNR_LEGACY_MODE env var at connect time
+    WorkerMode m_workerMode{WorkerMode::Batch};
 
-    // Input buffer: audio thread writes, send thread reads
+    // Input buffer: audio thread writes, worker thread reads
     std::mutex m_inMutex;
+    std::condition_variable m_inCv;
     std::vector<float> m_inBuf;
 
-    // Output buffer: recv thread writes, audio thread reads
+    // Output buffer: worker thread writes, audio thread reads
     std::mutex m_outMutex;
     std::vector<float> m_outBuf;
 
     static constexpr int kSampleRate   = 48000;
-    static constexpr int kFrameSamples = 480;   // 10ms at 48kHz
+    static constexpr int kFrameSamples = 480;    // 10ms at 48kHz
     static constexpr int kFrameBytes   = kFrameSamples * sizeof(float);
+    static constexpr int kBatchFrames  = 20;     // 200ms batch (20 × 10ms frames)
 #endif
 };
 
