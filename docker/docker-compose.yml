@@ -10,6 +10,11 @@ services:
     restart: unless-stopped
     networks:
       - dsp-net
+    environment:
+      # BNR worker thread mode (only relevant when using filter: "bnr"):
+      #   unset or 0 = default: concurrent send/recv threads (recommended)
+      #   1          = legacy:  alternating Write→Read per frame
+      # BNR_LEGACY_MODE: "0"
     healthcheck:
       # grpc_health_probe checks the gRPC health service registered by the server
       test: ["CMD-SHELL", "grpc_health_probe -addr=localhost:50051 2>/dev/null || exit 0"]
@@ -40,6 +45,14 @@ services:
       - "8001:8001"        # expose on host too (optional, for direct testing)
     networks:
       - dsp-net
+    environment:
+      # Set NGC_API_KEY to your NGC API key (required to download the model on first run).
+      # NGC_API_KEY: your_ngc_api_key_here
+      #
+      # BNR_LEGACY_MODE controls the NvidiaBnrFilter worker thread mode in ubersdr-dsp
+      # (set this on the ubersdr-dsp service, not here — shown for reference only):
+      #   unset or 0 = default: concurrent send/recv threads (matches official NIM client)
+      #   1          = legacy:  alternating Write→Read per frame (original behaviour)
     deploy:
       resources:
         reservations:

@@ -761,6 +761,21 @@ The `bnr-address` param defaults to `maxine-bnr:8001` and can only be set at
 session start. The `intensity` param (0.0–1.0) can be changed at runtime via
 `ParamUpdate`.
 
+#### Worker thread mode (`BNR_LEGACY_MODE`)
+
+The `NvidiaBnrFilter` worker can run in two modes, selected via the
+`BNR_LEGACY_MODE` environment variable on the `ubersdr-dsp` process:
+
+| Value | Mode | Description |
+|-------|------|-------------|
+| unset or `0` | **Default** | Two threads — one sends frames, one reads responses concurrently. Matches the official NVIDIA NIM Python client pattern. |
+| `1` | **Legacy** | Single thread — alternating `Write→Read` per frame. Original behaviour; may cause NIM to return empty responses. |
+
+To enable legacy mode in Docker:
+```bash
+docker run ... -e BNR_LEGACY_MODE=1 madpsy/ubersdr-dsp:latest
+```
+
 ### How it works
 
 BNR streams **480-sample (10 ms) frames of 48 kHz mono float32** to the NIM

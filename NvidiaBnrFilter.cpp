@@ -1,6 +1,7 @@
 #include "NvidiaBnrFilter.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 
@@ -18,6 +19,14 @@ NvidiaBnrFilter::~NvidiaBnrFilter()
 bool NvidiaBnrFilter::connectToServer(const std::string& address)
 {
     if (m_connected.load()) disconnect();
+
+    // Select worker mode from environment variable.
+    // Default: two-thread concurrent send/receive (matches official NIM client).
+    // Legacy: single-thread alternating Write→Read (original behaviour).
+    const char* legacyEnv = std::getenv("BNR_LEGACY_MODE");
+    m_legacyMode = (legacyEnv && legacyEnv[0] == '1');
+    fprintf(stderr, "NvidiaBnrFilter: using %s worker mode\n",
+            m_legacyMode ? "legacy (alternating Write/Read)" : "default (concurrent send/recv)");
 
     m_stopping.store(false);
 
@@ -56,8 +65,14 @@ bool NvidiaBnrFilter::connectToServer(const std::string& address)
         m_outBuf.clear();
     }
 
-    // Start worker thread (handles all gRPC read/write)
-    m_workerThread = std::thread(&NvidiaBnrFilter::workerLoop, this);
+    if (m_legacyMode) {
+        // Legacy: single thread, alternating Write→Read
+        m_workerThread = std::thread(&NvidiaBnrFilter::workerLoop, this);
+    } else {
+        // Default: separate send and receive threads
+        m_sendThread = std::thread(&NvidiaBnrFilter::sendLoop, this);
+        m_recvThread = std::thread(&NvidiaBnrFilter::recvLoop, this);
+    }
 
     fprintf(stderr, "NvidiaBnrFilter: connected to %s, intensity: %.2f\n",
             address.c_str(), m_intensityRatio);
@@ -67,17 +82,24 @@ bool NvidiaBnrFilter::connectToServer(const std::string& address)
 
 void NvidiaBnrFilter::disconnect()
 {
-    if (!m_connected.load() && !m_workerThread.joinable()) return;
+    if (!m_connected.load() &&
+        !m_workerThread.joinable() &&
+        !m_sendThread.joinable() &&
+        !m_recvThread.joinable()) return;
 
     m_stopping.store(true);
     m_connected.store(false);
 
-    // Cancel the gRPC context to unblock any pending Read/Write in the worker
+    // Cancel the gRPC context to unblock any pending Read/Write
     if (m_context)
         m_context->TryCancel();
 
     if (m_workerThread.joinable())
         m_workerThread.join();
+    if (m_sendThread.joinable())
+        m_sendThread.join();
+    if (m_recvThread.joinable())
+        m_recvThread.join();
 
     if (m_stream)
         m_stream.reset();
@@ -111,7 +133,7 @@ std::vector<float> NvidiaBnrFilter::process(const float* samples, int numSamples
 {
     if (!m_connected.load()) return {};
 
-    // Non-blocking: push samples into input buffer for the worker thread
+    // Non-blocking: push samples into input buffer for the send thread
     {
         std::lock_guard<std::mutex> lock(m_inMutex);
         m_inBuf.insert(m_inBuf.end(), samples, samples + numSamples);
@@ -123,7 +145,7 @@ std::vector<float> NvidiaBnrFilter::process(const float* samples, int numSamples
                           m_inBuf.begin() + (m_inBuf.size() - maxInSamples));
     }
 
-    // Non-blocking: return any denoised data from the worker thread
+    // Non-blocking: return any denoised data from the recv/worker thread
     std::lock_guard<std::mutex> lock(m_outMutex);
     if (m_outBuf.empty()) return {};
 
@@ -131,6 +153,97 @@ std::vector<float> NvidiaBnrFilter::process(const float* samples, int numSamples
     result.swap(m_outBuf);
     return result;
 }
+
+// ── Default mode: separate send and receive threads ───────────────────────────
+
+void NvidiaBnrFilter::sendLoop()
+{
+    // Continuously pulls 480-sample frames from m_inBuf and writes to NIM.
+    // Does NOT wait for responses — recvLoop handles those concurrently.
+    while (!m_stopping.load()) {
+        // Send config update if intensity changed
+        if (m_configDirty.exchange(false)) {
+            nvidia::maxine::bnr::v1::EnhanceAudioRequest configReq;
+            auto* config = configReq.mutable_config();
+            config->set_intensity_ratio(m_intensityRatio);
+            if (!m_stream->Write(configReq)) {
+                if (!m_stopping.load()) {
+                    fprintf(stderr, "NvidiaBnrFilter: sendLoop config write failed\n");
+                    m_connected.store(false);
+                    if (onConnectionChanged) onConnectionChanged(false);
+                    if (onError) onError("gRPC config write failed");
+                }
+                return;
+            }
+        }
+
+        // Pull a frame from input buffer
+        std::vector<float> frame;
+        {
+            std::lock_guard<std::mutex> lock(m_inMutex);
+            if (static_cast<int>(m_inBuf.size()) >= kFrameSamples) {
+                frame = std::vector<float>(m_inBuf.begin(), m_inBuf.begin() + kFrameSamples);
+                m_inBuf.erase(m_inBuf.begin(), m_inBuf.begin() + kFrameSamples);
+            }
+        }
+
+        if (frame.empty()) {
+            // No data yet — sleep briefly to avoid busy-wait
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+
+        // Write frame to gRPC stream (non-blocking from NIM's perspective —
+        // recvLoop reads responses independently)
+        nvidia::maxine::bnr::v1::EnhanceAudioRequest req;
+        req.set_audio_stream_data(reinterpret_cast<const char*>(frame.data()), kFrameBytes);
+
+        if (!m_stream->Write(req)) {
+            if (!m_stopping.load()) {
+                fprintf(stderr, "NvidiaBnrFilter: sendLoop write failed\n");
+                m_connected.store(false);
+                if (onConnectionChanged) onConnectionChanged(false);
+                if (onError) onError("gRPC write failed");
+            }
+            return;
+        }
+    }
+}
+
+void NvidiaBnrFilter::recvLoop()
+{
+    // Continuously reads responses from NIM and pushes denoised audio to m_outBuf.
+    // Runs concurrently with sendLoop — matches the official NIM client pattern.
+    nvidia::maxine::bnr::v1::EnhanceAudioResponse response;
+    while (!m_stopping.load()) {
+        if (!m_stream->Read(&response)) {
+            if (!m_stopping.load()) {
+                fprintf(stderr, "NvidiaBnrFilter: recvLoop read failed\n");
+                m_connected.store(false);
+                if (onConnectionChanged) onConnectionChanged(false);
+                if (onError) onError("BNR container stream ended");
+            }
+            return;
+        }
+
+        if (response.has_audio_stream_data()) {
+            const auto& data = response.audio_stream_data();
+            const float* fptr = reinterpret_cast<const float*>(data.data());
+            const int fcount = static_cast<int>(data.size()) / sizeof(float);
+
+            std::lock_guard<std::mutex> lock(m_outMutex);
+            m_outBuf.insert(m_outBuf.end(), fptr, fptr + fcount);
+
+            // Cap output buffer at ~200ms
+            constexpr int maxOutSamples = kFrameSamples * 20;
+            if (static_cast<int>(m_outBuf.size()) > maxOutSamples)
+                m_outBuf.erase(m_outBuf.begin(),
+                               m_outBuf.begin() + (m_outBuf.size() - maxOutSamples));
+        }
+    }
+}
+
+// ── Legacy mode: single thread, alternating Write→Read ───────────────────────
 
 void NvidiaBnrFilter::workerLoop()
 {
@@ -166,12 +279,12 @@ void NvidiaBnrFilter::workerLoop()
         static int s_frameCount = 0;
         ++s_frameCount;
         if (s_frameCount <= 5 || s_frameCount % 500 == 0)
-            fprintf(stderr, "NvidiaBnrFilter: writing frame %d (%d bytes)\n",
+            fprintf(stderr, "NvidiaBnrFilter[legacy]: writing frame %d (%d bytes)\n",
                     s_frameCount, kFrameBytes);
 
         if (!m_stream->Write(req)) {
             if (!m_stopping.load()) {
-                fprintf(stderr, "NvidiaBnrFilter: gRPC write failed (frame %d)\n", s_frameCount);
+                fprintf(stderr, "NvidiaBnrFilter[legacy]: gRPC write failed (frame %d)\n", s_frameCount);
                 m_connected.store(false);
                 if (onConnectionChanged) onConnectionChanged(false);
                 if (onError) onError("gRPC write failed");
@@ -180,13 +293,13 @@ void NvidiaBnrFilter::workerLoop()
         }
 
         if (s_frameCount <= 5 || s_frameCount % 500 == 0)
-            fprintf(stderr, "NvidiaBnrFilter: write OK frame %d, waiting for Read...\n", s_frameCount);
+            fprintf(stderr, "NvidiaBnrFilter[legacy]: write OK frame %d, waiting for Read...\n", s_frameCount);
 
-        // Read denoised response (blocking, but on worker thread — not audio)
+        // Read denoised response (blocking)
         nvidia::maxine::bnr::v1::EnhanceAudioResponse response;
         if (!m_stream->Read(&response)) {
             if (!m_stopping.load()) {
-                fprintf(stderr, "NvidiaBnrFilter: gRPC read failed (frame %d)\n", s_frameCount);
+                fprintf(stderr, "NvidiaBnrFilter[legacy]: gRPC read failed (frame %d)\n", s_frameCount);
                 m_connected.store(false);
                 if (onConnectionChanged) onConnectionChanged(false);
                 if (onError) onError("BNR container stream ended");
@@ -195,7 +308,7 @@ void NvidiaBnrFilter::workerLoop()
         }
 
         if (s_frameCount <= 5 || s_frameCount % 500 == 0)
-            fprintf(stderr, "NvidiaBnrFilter: Read returned frame %d, has_audio=%d size=%zu\n",
+            fprintf(stderr, "NvidiaBnrFilter[legacy]: Read returned frame %d, has_audio=%d size=%zu\n",
                     s_frameCount,
                     response.has_audio_stream_data(),
                     response.has_audio_stream_data() ? response.audio_stream_data().size() : 0);
