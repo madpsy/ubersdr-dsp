@@ -359,14 +359,14 @@ void DspServiceImpl::populateFilterInfo(dsp::v1::GetFiltersResponse* resp)
     {
         Nr2FilterWrapper tmp;
         addFilter(resp, "nr2",
-                  "SpectralNR — MMSE-LSA + OSMS spectral subtraction (always available)",
+                  "SpectralNR — MMSE-LSA + OSMS spectral subtraction",
                   tmp.describe());
     }
     // RN2
     {
         Rn2FilterWrapper tmp;
         addFilter(resp, "rn2",
-                  "RNNoise — Mozilla/Xiph RNN-based suppressor (always available, no params)",
+                  "RNNoise — Mozilla/Xiph RNN-based suppressor",
                   tmp.describe());
     }
     // NR4
@@ -395,7 +395,7 @@ void DspServiceImpl::populateFilterInfo(dsp::v1::GetFiltersResponse* resp)
     {
         BnrFilterWrapper tmp(""); // don't actually connect
         addFilter(resp, "bnr",
-                  "NVIDIA Maxine BNR — cloud/NIM gRPC denoiser"
+                  "NVIDIA Maxine BNR — NIM denoiser"
 #ifndef HAVE_BNR
                   " [NOT COMPILED IN]"
 #endif

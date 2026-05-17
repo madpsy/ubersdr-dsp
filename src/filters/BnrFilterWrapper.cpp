@@ -15,6 +15,8 @@ static bool parseFloat(const std::string& s, float& out)
 // ── BnrFilterWrapper ──────────────────────────────────────────────────────────
 
 BnrFilterWrapper::BnrFilterWrapper(const std::string& bnrAddress)
+    : m_up(std::make_unique<AetherSDR::Resampler>(24000, 48000))
+    , m_down(std::make_unique<AetherSDR::Resampler>(48000, 24000))
 {
     m_filter.onError = [](const std::string& msg) {
         fprintf(stderr, "BNR error: %s\n", msg.c_str());
@@ -45,33 +47,40 @@ BnrFilterWrapper::~BnrFilterWrapper()
 
 std::vector<float> BnrFilterWrapper::process(const float* pcm, int stereoFrames)
 {
+    const int needed = stereoFrames * 2;
+
 #ifndef HAVE_BNR
-    return std::vector<float>(pcm, pcm + stereoFrames * 2);
+    return std::vector<float>(pcm, pcm + needed);
 #else
-    // Downmix stereo → mono for BNR
-    std::vector<float> mono(stereoFrames);
-    for (int i = 0; i < stereoFrames; ++i)
-        mono[i] = (pcm[i * 2] + pcm[i * 2 + 1]) * 0.5f;
+    // 1. Upsample 24 kHz stereo → 48 kHz mono via r8brain.
+    //    processStereoToMono downmixes L+R and resamples in one pass.
+    std::vector<float> mono48k = m_up->processStereoToMono(pcm, stereoFrames);
 
-    auto chunk = m_filter.process(mono.data(), stereoFrames);
-    m_accumulated.insert(m_accumulated.end(), chunk.begin(), chunk.end());
+    // 2. Push 48 kHz mono samples into NvidiaBnrFilter (non-blocking).
+    //    The filter's worker thread sends them to the NIM server and
+    //    accumulates denoised responses in its output buffer.
+    std::vector<float> denoised48k = m_filter.process(mono48k.data(),
+                                                       static_cast<int>(mono48k.size()));
 
-    // Emit output when we have enough samples
-    std::vector<float> out;
-    while (static_cast<int>(m_accumulated.size()) >= stereoFrames) {
-        for (int i = 0; i < stereoFrames; ++i) {
-            out.push_back(m_accumulated[i]);
-            out.push_back(m_accumulated[i]);
-        }
-        m_accumulated.erase(m_accumulated.begin(),
-                            m_accumulated.begin() + stereoFrames);
+    // 3. Downsample any returned 48 kHz mono → 24 kHz stereo and accumulate.
+    if (!denoised48k.empty()) {
+        std::vector<float> stereo24k = m_down->processMonoToStereo(
+            denoised48k.data(), static_cast<int>(denoised48k.size()));
+        m_outAccum.insert(m_outAccum.end(), stereo24k.begin(), stereo24k.end());
     }
 
-    // If we don't have enough output yet, return silence to maintain timing
-    if (out.empty())
-        out.assign(stereoFrames * 2, 0.0f);
+    // 4. Return exactly stereoFrames * 2 samples when we have enough.
+    //    This keeps the output frame count consistent with all other filters.
+    if (static_cast<int>(m_outAccum.size()) >= needed) {
+        std::vector<float> result(m_outAccum.begin(), m_outAccum.begin() + needed);
+        m_outAccum.erase(m_outAccum.begin(), m_outAccum.begin() + needed);
+        return result;
+    }
 
-    return out;
+    // Not enough output yet (NIM round-trip latency during startup).
+    // Return silence to maintain timing — this only happens for the first
+    // few frames while the pipeline fills.
+    return std::vector<float>(needed, 0.0f);
 #endif
 }
 
@@ -101,7 +110,7 @@ std::vector<ParamDescriptor> BnrFilterWrapper::describe() const
 {
     return {
         {"bnr-address", "string", "maxine-bnr:8001", "", "",    "NVIDIA Maxine NIM gRPC server address (set at session start only)", false},
-        {"intensity",   "float",  "1.0",            "0", "1", "Noise suppression intensity ratio",                                  true},
+        {"intensity",   "float",  "1.0",             "0", "1", "Noise suppression intensity ratio",                                  true},
     };
 }
 

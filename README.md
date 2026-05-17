@@ -765,8 +765,30 @@ session start. The `intensity` param (0.0–1.0) can be changed at runtime via
 
 BNR streams **480-sample (10 ms) frames of 48 kHz mono float32** to the NIM
 server via a bidirectional gRPC stream and receives denoised audio back.
-The session-level pipeline handles the 24 kHz stereo ↔ 48 kHz mono conversion
-transparently — you feed and receive the same format as all other filters.
+
+`BnrFilterWrapper` handles the 24 kHz stereo ↔ 48 kHz mono conversion
+internally using r8brain resamplers (the same library used by the session
+pipeline and DFNR):
+
+```
+24 kHz stereo float32 (from pipeline)
+        │
+        ▼
+[Stereo → Mono downmix + upsample to 48 kHz]   r8brain
+        │
+        ▼
+[NvidiaBnrFilter]   async gRPC to NIM — 480-sample frames @ 48 kHz
+        │
+        ▼
+[Downsample to 24 kHz + Mono → Stereo expand]  r8brain
+        │
+        ▼
+24 kHz stereo float32 (back to pipeline)
+```
+
+The session-level pipeline then handles any further 24 ↔ 12 kHz resampling
+and mono/stereo conversion — you feed and receive the same format as all
+other filters regardless of client sample rate or channel count.
 
 ---
 
