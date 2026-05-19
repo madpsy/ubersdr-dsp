@@ -61,7 +61,7 @@ private:
     std::unique_ptr<Resampler> m_down;      // 48kHz mono → 24kHz mono
     std::vector<float> m_inAccum;           // accumulate 48kHz mono float input
     std::vector<float> m_outAccum;          // accumulate 24kHz stereo float32 output
-    std::atomic<float> m_attenLimit{100.0f};
+    std::atomic<float> m_attenLimit{20.0f};
     std::atomic<float> m_postFilterBeta{0.0f};
     std::atomic<bool>  m_paramsDirty{false};
 };

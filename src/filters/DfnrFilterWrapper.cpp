@@ -76,7 +76,7 @@ std::vector<ParamDescriptor> DfnrFilterWrapper::describe() const
 {
     return {
         {"model",       "string", "",    "",  "",    "Path to DeepFilterNet3_onnx.tar.gz (set at session start only)", false},
-        {"atten-limit", "float",  "100", "0", "100", "Attenuation limit in dB",                                        true},
+        {"atten-limit", "float",  "20",  "0", "100", "Attenuation limit in dB (default 20 suits SDR/HF voice levels)", true},
         {"pf-beta",     "float",  "0",   "0", "0.3", "Post-filter beta",                                               true},
     };
 }
