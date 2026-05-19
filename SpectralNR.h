@@ -125,6 +125,14 @@ private:
     int m_outWritePos{0};
     int m_outReadPos{0};
 
+    // Output FIFO: holds samples drained from m_outAccum that are ready to be
+    // returned but haven't been consumed yet.  This decouples the OLA write
+    // cadence (hopSize=128 samples per frame) from the caller's packet size,
+    // preventing the read pointer from overtaking the write pointer and reading
+    // unwritten (zero) positions when the packet size is not a multiple of
+    // hopSize — which causes periodic crackling at a constant rate.
+    std::vector<double> m_outputFifo;
+
     // Window
     std::vector<double> m_window;
 

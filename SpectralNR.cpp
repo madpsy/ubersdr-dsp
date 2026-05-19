@@ -1,6 +1,6 @@
 /*  SpectralNR.cpp
 
-This file is part of AetherSDR.
+This file is part of AetherSDR and modified for UberSDR
 
 Portions of this file are derived from WDSP (emnr.c):
   Copyright (C) 2015, 2025 Warren Pratt, NR0V
@@ -167,6 +167,7 @@ void SpectralNR::reset()
     m_inReadPos = 0;
     m_samplesAccum = 0;
     m_firstFrameFired = false;
+    m_outputFifo.clear();
 
     // Critical: output write position must lead read position by (fftSize - hopSize)
     // so that the overlap-add accumulates both frame contributions before samples
@@ -364,20 +365,40 @@ void SpectralNR::process(const float* input, float* output, int numSamples)
         m_firstFrameFired = true;
     }
 
-    // Read output samples (float64 -> float32), clearing consumed positions.
-    // Guard on m_firstFrameFired: before the first OLA frame has been processed
-    // (which happens when the first chunk is smaller than fftSize), emit zeros
-    // rather than reading the pre-zeroed ring — prevents the startup click that
-    // would otherwise occur on the very first packet from ubersdr/radiod.
-    // Once the first frame has fired the ring is valid and we read unconditionally.
+    // Drain only the samples the OLA has actually written into the ring this
+    // call, appending them to m_outputFifo.  The gap between outWritePos and
+    // outReadPos (mod outSize) is the number of valid, unread samples in the
+    // ring.  Reading beyond that gap reads unwritten (zero) positions, which
+    // causes periodic crackling when the packet size is not a multiple of
+    // hopSize (e.g. 480 samples at 24 kHz gives 3.75 frames/call with
+    // hopSize=128, so the write pointer falls behind the read pointer on some
+    // calls and the deficit never recovers).
+    //
+    // By draining only what is valid into m_outputFifo and returning exactly
+    // numSamples from the front of the FIFO, the imbalance is absorbed across
+    // calls rather than injected as zeros into the output stream.
     if (m_firstFrameFired) {
-        for (int i = 0; i < numSamples; ++i) {
-            output[i] = static_cast<float>(m_outAccum[m_outReadPos]);
+        const int valid = (m_outWritePos - m_outReadPos + outSize) % outSize;
+        for (int i = 0; i < valid; ++i) {
+            m_outputFifo.push_back(m_outAccum[m_outReadPos]);
             m_outAccum[m_outReadPos] = 0.0;
             m_outReadPos = (m_outReadPos + 1) % outSize;
         }
+    }
+
+    // Return exactly numSamples from the front of the FIFO.
+    // Pad with zeros only if the FIFO is genuinely empty (startup priming).
+    for (int i = 0; i < numSamples; ++i) {
+        if (i < static_cast<int>(m_outputFifo.size())) {
+            output[i] = static_cast<float>(m_outputFifo[i]);
+        } else {
+            output[i] = 0.0f;
+        }
+    }
+    if (static_cast<int>(m_outputFifo.size()) >= numSamples) {
+        m_outputFifo.erase(m_outputFifo.begin(), m_outputFifo.begin() + numSamples);
     } else {
-        std::fill(output, output + numSamples, 0.0f);
+        m_outputFifo.clear();
     }
 }
 

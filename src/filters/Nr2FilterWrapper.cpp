@@ -37,44 +37,21 @@ Nr2FilterWrapper::Nr2FilterWrapper()
 
 std::vector<float> Nr2FilterWrapper::process(const float* pcm, int stereoFrames)
 {
-    // ── Stereo → mono (average L+R) ──────────────────────────────────────────
     m_monoIn.resize(stereoFrames);
+    m_monoOut.resize(stereoFrames);
+
+    // Stereo → mono (average L+R)
     for (int i = 0; i < stereoFrames; ++i)
         m_monoIn[i] = (pcm[i * 2] + pcm[i * 2 + 1]) * 0.5f;
 
-    // ── Run SpectralNR ────────────────────────────────────────────────────────
-    // SpectralNR::process() reads exactly numSamples from its OLA output ring,
-    // but the ring is only written by complete FFT frames (hopSize=128 samples
-    // each).  When the packet size is not a multiple of hopSize — e.g. 480
-    // samples (12 kHz × 20 ms upsampled to 24 kHz) gives 3.75 frames/call —
-    // the write pointer falls behind the read pointer on some calls, causing
-    // SpectralNR to read unwritten (zero) positions.  Those zeros appear as
-    // periodic crackling at a constant rate.
-    //
-    // Fix: accumulate SpectralNR output in m_outAccum and only return a full
-    // stereoFrames-sized block once enough samples have built up.  This absorbs
-    // the per-call imbalance across calls, exactly as RNNoiseFilter does with
-    // its own m_outAccum.  The FIFO reaches steady state after 1–2 packets and
-    // stays there permanently; the only silence is during the very first packet
-    // while the OLA ring primes (~20 ms, inaudible).
-    m_monoOut.resize(stereoFrames);
     m_filter.process(m_monoIn.data(), m_monoOut.data(), stereoFrames);
 
-    m_outAccum.insert(m_outAccum.end(), m_monoOut.begin(), m_monoOut.end());
-
-    // ── Return a full block once the FIFO has enough ──────────────────────────
-    if (static_cast<int>(m_outAccum.size()) < stereoFrames) {
-        // OLA ring not yet primed — return silence for this packet only.
-        return std::vector<float>(stereoFrames * 2, 0.0f);
-    }
-
-    // Mono → stereo (duplicate), consuming stereoFrames samples from the front.
+    // Mono → stereo (duplicate)
     std::vector<float> out(stereoFrames * 2);
     for (int i = 0; i < stereoFrames; ++i) {
-        out[i * 2]     = m_outAccum[i];
-        out[i * 2 + 1] = m_outAccum[i];
+        out[i * 2]     = m_monoOut[i];
+        out[i * 2 + 1] = m_monoOut[i];
     }
-    m_outAccum.erase(m_outAccum.begin(), m_outAccum.begin() + stereoFrames);
     return out;
 }
 
