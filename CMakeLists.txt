@@ -94,40 +94,61 @@ set(RNNOISE_SOURCES
     ${RNNOISE_DIR}/src/rnn.c
     ${RNNOISE_DIR}/src/rnnoise_data.c
     ${RNNOISE_DIR}/src/rnnoise_tables.c
-    ${RNNOISE_DIR}/src/x86/x86cpu.c
-    ${RNNOISE_DIR}/src/x86/x86_dnn_map.c
 )
+
+# x86 RTCD sources are only meaningful on x86; including them on ARM64 pulls in
+# x86 CPU-detection code that has no ARM equivalent and may fail to compile or link.
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    list(APPEND RNNOISE_SOURCES
+        ${RNNOISE_DIR}/src/x86/x86cpu.c
+        ${RNNOISE_DIR}/src/x86/x86_dnn_map.c
+    )
+endif()
 
 set(RNNOISE_AVX2_SOURCES  ${RNNOISE_DIR}/src/x86/nnet_avx2.c)
 set(RNNOISE_SSE41_SOURCES ${RNNOISE_DIR}/src/x86/nnet_sse4_1.c)
 
 include(CheckCCompilerFlag)
-check_c_compiler_flag(-mavx2   COMPILER_HAS_AVX2)
-check_c_compiler_flag(-msse4.1 COMPILER_HAS_SSE41)
 
-if(COMPILER_HAS_AVX2)
-    list(APPEND RNNOISE_SOURCES ${RNNOISE_AVX2_SOURCES})
-    set_source_files_properties(${RNNOISE_AVX2_SOURCES}
-        PROPERTIES COMPILE_FLAGS "-mavx2 -mfma")
-endif()
-
-if(COMPILER_HAS_SSE41)
-    list(APPEND RNNOISE_SOURCES ${RNNOISE_SSE41_SOURCES})
-    set_source_files_properties(${RNNOISE_SSE41_SOURCES}
-        PROPERTIES COMPILE_FLAGS "-msse4.1")
-endif()
-
-check_c_compiler_flag(-march=native COMPILER_HAS_MARCH_NATIVE)
-if(COMPILER_HAS_MARCH_NATIVE)
+# ── Architecture-specific optimisation flags for rnnoise ──────────────────────
+# On ARM64 use a safe ARMv8-A baseline so that Docker images built on a powerful
+# ARM64 host (Graviton3, Apple M2 CI) don't emit dot-product instructions
+# (vdotq_s32 / FEAT_DotProd) that SIGILL on older targets (Cortex-A53, Pi 4,
+# Graviton1/2).  NEON is mandatory in all ARMv8-A so vec_neon.h still activates
+# and rnnoise uses the safe vpadalq_s16 fallback path.
+# On x86 keep -march=native for maximum performance.
+# (Same pattern as ka9q-radio/src/Makefile.)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
     set_source_files_properties(${RNNOISE_SOURCES}
-        PROPERTIES COMPILE_FLAGS "-march=native")
+        PROPERTIES COMPILE_FLAGS "-march=armv8-a")
+else()
+    check_c_compiler_flag(-mavx2   COMPILER_HAS_AVX2)
+    check_c_compiler_flag(-msse4.1 COMPILER_HAS_SSE41)
+
     if(COMPILER_HAS_AVX2)
+        list(APPEND RNNOISE_SOURCES ${RNNOISE_AVX2_SOURCES})
         set_source_files_properties(${RNNOISE_AVX2_SOURCES}
-            PROPERTIES COMPILE_FLAGS "-march=native -mavx2 -mfma")
+            PROPERTIES COMPILE_FLAGS "-mavx2 -mfma")
     endif()
+
     if(COMPILER_HAS_SSE41)
+        list(APPEND RNNOISE_SOURCES ${RNNOISE_SSE41_SOURCES})
         set_source_files_properties(${RNNOISE_SSE41_SOURCES}
-            PROPERTIES COMPILE_FLAGS "-march=native -msse4.1")
+            PROPERTIES COMPILE_FLAGS "-msse4.1")
+    endif()
+
+    check_c_compiler_flag(-march=native COMPILER_HAS_MARCH_NATIVE)
+    if(COMPILER_HAS_MARCH_NATIVE)
+        set_source_files_properties(${RNNOISE_SOURCES}
+            PROPERTIES COMPILE_FLAGS "-march=native")
+        if(COMPILER_HAS_AVX2)
+            set_source_files_properties(${RNNOISE_AVX2_SOURCES}
+                PROPERTIES COMPILE_FLAGS "-march=native -mavx2 -mfma")
+        endif()
+        if(COMPILER_HAS_SSE41)
+            set_source_files_properties(${RNNOISE_SSE41_SOURCES}
+                PROPERTIES COMPILE_FLAGS "-march=native -msse4.1")
+        endif()
     endif()
 endif()
 
