@@ -110,6 +110,12 @@ set(RNNOISE_SSE41_SOURCES ${RNNOISE_DIR}/src/x86/nnet_sse4_1.c)
 
 include(CheckCCompilerFlag)
 
+# Use the int8-quantised RNNoise weights (upstream's default build). Without this
+# the large float "debug" weights are compiled in and preferred at runtime,
+# making RN2 ~3x more expensive.
+set_property(SOURCE ${RNNOISE_SOURCES} ${RNNOISE_AVX2_SOURCES} ${RNNOISE_SSE41_SOURCES}
+    APPEND PROPERTY COMPILE_DEFINITIONS DISABLE_DEBUG_FLOAT)
+
 # ── Architecture-specific optimisation flags for rnnoise ──────────────────────
 # On ARM64 use a safe ARMv8-A baseline so that Docker images built on a powerful
 # ARM64 host (Graviton3, Apple M2 CI) don't emit dot-product instructions
@@ -187,6 +193,11 @@ if(WITH_SPECBLEACH)
         "${AETHER_THIRD_PARTY}/libspecbleach/src/*.c"
     )
     list(APPEND FILTER_SOURCES SpecbleachFilter.cpp ${SPECBLEACH_SOURCES})
+    # Lets GCC vectorise the powf/logf/log10f loops via glibc libmvec (~45% less
+    # NR4 CPU). libspecbleach has no isfinite()/isnan() checks that rely on IEEE
+    # NaN/Inf semantics (the one in spp_mmse_noise_estimator.c is a clamp).
+    set_source_files_properties(${SPECBLEACH_SOURCES}
+        PROPERTIES COMPILE_OPTIONS "-ffast-math")
 endif()
 
 # ── DeepFilterNet3 (DFNR) ────────────────────────────────────────────────────

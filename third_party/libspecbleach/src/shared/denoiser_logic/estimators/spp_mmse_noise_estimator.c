@@ -42,10 +42,11 @@ static float compute_spp_probability(float observation_power,
   float ratio = observation_power / previous_noise_psd;
   float exponent = -ratio * (SPP_FIXED_XI_H1 / (1.F + SPP_FIXED_XI_H1));
 
+  // Clamp the exponent instead of testing the result with isfinite(): this
+  // file is built with -ffast-math, which assumes finite values and would
+  // optimise an isfinite() check away. expf(+/-87) stays within float range.
+  exponent = fmaxf(-87.F, fminf(87.F, exponent));
   float exp_term = expf(exponent);
-  if (!isfinite(exp_term)) {
-    exp_term = (exponent > 0.F) ? FLT_MAX : 0.F;
-  }
 
   float denominator_ratio = (1.F + SPP_FIXED_XI_H1) * exp_term;
   float spp = 1.F / (1.F + denominator_ratio);

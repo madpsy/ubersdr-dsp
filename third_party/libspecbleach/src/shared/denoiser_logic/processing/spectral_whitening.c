@@ -80,6 +80,15 @@ void spectral_whitening_get_weights(SpectralWhitening* self,
     return;
   }
 
+  // With whitening disabled every weight is 1.0 * taper, so skip the smoothing
+  // and the per-frame median sort entirely.
+  if (whitening_factor <= 0.0f) {
+    for (uint32_t k = 0U; k < self->real_spectrum_size; k++) {
+      weights_out[k] = self->tapering_window[k];
+    }
+    return;
+  }
+
   // 1. Create a smoothed copy of the noise profile for stable weight
   // calculation
   float* smoothed_profile =
